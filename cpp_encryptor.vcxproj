@@ -18,6 +18,15 @@
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="encryption.cpp" />
+    <ClCompile Include="filesize.cpp" />
+    <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="encryption.h" />
+    <ClInclude Include="filesize.h" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>15.0</VCProjectVersion>
     <ProjectGuid>{B8E7F31C-F04E-4706-AE2B-2DA011633D92}</ProjectGuid>
@@ -114,15 +123,6 @@
       <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
-  <ItemGroup>
-    <ClCompile Include="G:\Visual Studio\cpp encryptor\cpp encryptor\encryption.cpp" />
-    <ClCompile Include="G:\Visual Studio\cpp encryptor\cpp encryptor\filesize.cpp" />
-    <ClCompile Include="G:\Visual Studio\cpp encryptor\cpp encryptor\main.cpp" />
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="G:\Visual Studio\cpp encryptor\cpp encryptor\encryption.h" />
-    <ClInclude Include="G:\Visual Studio\cpp encryptor\cpp encryptor\filesize.h" />
-  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

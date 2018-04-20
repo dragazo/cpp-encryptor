@@ -148,20 +148,23 @@ struct CryptoSettings
 void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t processor, std::ostream *log)
 {
 	// macro used for cleaning up after execution
-#define clean {/* set running to false and wait for threads to terminate */\
-	running = false; for (int i = 0; i < threadc; ++i) threads[i].join();\
-	delete[] threads; delete[] settings;\
-	for (int i(0); i < maskc; ++i) delete[] masks[i]; delete[] masks;\
-	delete[] buffer;\
-	}
+	#define clean { running = false; for (int i = 0; i < threadc; ++i) threads[i].join(); delete[] threads; delete[] settings; freemasks(masks, maskc); delete[] buffer; }
 
 	// -- initialize data -- //
 
-	// the exception generated during execution
-	std::exception *except = nullptr;
+	std::streampos in_pos = in.tellg();   // the position in the input file (we need to store these in case in/out are the same file)
+	std::streampos out_pos = out.tellp(); // the position in the output file
 
-	// the number of bytes that have been processed
-	std::streamsize progress = 0;
+	std::streamsize progress = 0; // the number of bytes that have been processed
+	std::streamsize total;        // total length of the file
+
+	// get total length
+	in.seekg(0, in.end);
+	total = in.tellg() - in_pos;
+
+	// compact the total length
+	const char *total_units;
+	double c_total = compact_filesize((double)total, total_units);
 
 	// allocate the data buffer
 	char *buffer = new char[buffer_size];
@@ -216,11 +219,13 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 		// loop over the mask offset (each pass consumes buffer_size, so increment by that)
 		for (int offset = 0; ; offset = (offset + buffer_size) % maskc)
 		{
+			// seek read pos (required if in/out are the same file)
+			in.seekg(in_pos);
 			// read data from input
 			in.read(buffer, buffer_size);
+
 			// get the number of bytes read
 			std::streamsize len = in.gcount();
-
 			// if we read nothing, we're done
 			if (len == 0) break;
 
@@ -242,13 +247,22 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 			processor(buffer, masks, maskc, width * threadc, len - width * threadc, (offset + width * threadc) % maskc);
 
 			// if we gave the threads work, wait for them to finish
-			if (width > 0) for (int i(0); i < threadc; ++i)
+			if (width > 0) for (int i = 0; i < threadc; ++i)
 				while (settings[i].has_data) std::this_thread::yield();
 
+			std::cout << in_pos << ' ' << out_pos << '\n';
+
+			// clear out's state (reading to eof sets eof flag, which means we can't write the data back if in/out are the same file)
+			out.clear();
+			// seek write pos (required if in/out are the same file)
+			out.seekp(out_pos);
 			// write the result back to output
 			out.write(buffer, len);
-			// increase progress by number of bytes read
+			
+			// increment things as needed
 			progress += len;
+			in_pos += len;
+			out_pos += len;
 
 			// if logging enabled
 			if (log)
@@ -258,7 +272,10 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 				double c_progress = compact_filesize((double)progress, progress_units);
 
 				// output progress
-				*log << "processed " << std::setprecision(1) << std::fixed << c_progress << progress_units << '\n';
+				*log <<
+					"processed " << std::setprecision(1) << std::fixed << c_progress << progress_units
+					<< '/' << std::setprecision(1) << std::fixed << c_total << total_units
+					<< " (" << std::setprecision(1) << std::fixed << (100 * c_progress / c_total) << "%)\n";
 			}
 		}
 
@@ -282,5 +299,5 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 	// clean up
 	clean;
 
-#undef clean
+	#undef clean
 }

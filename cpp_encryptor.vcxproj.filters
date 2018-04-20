@@ -15,21 +15,21 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="G:\Visual Studio\cpp encryptor\cpp encryptor\encryption.cpp">
+    <ClCompile Include="encryption.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="G:\Visual Studio\cpp encryptor\cpp encryptor\filesize.cpp">
+    <ClCompile Include="filesize.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="G:\Visual Studio\cpp encryptor\cpp encryptor\main.cpp">
+    <ClCompile Include="main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="G:\Visual Studio\cpp encryptor\cpp encryptor\encryption.h">
+    <ClInclude Include="encryption.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="G:\Visual Studio\cpp encryptor\cpp encryptor\filesize.h">
+    <ClInclude Include="filesize.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
