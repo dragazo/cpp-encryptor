@@ -4,8 +4,12 @@
 #include <iostream>
 #include <iomanip>
 #include <thread>
+#include <algorithm>
 #include "encryption.h"
 #include "filesize.h"
+
+// rotates an 8-bit value v to the right by n bits
+#define rot_8(v, n) ((v >> n) | (v << n) & 0xff)
 
 // the size of the buffer used during encryption
 constexpr int buffer_size = 1000000;
@@ -48,13 +52,25 @@ void freemasks(int *masks)
 
 int** getmasks(const char *key, int &maskc)
 {
-	// simple implementation: one set for each character in the string
+	maskc = strlen(key);         // get the string length
+	int **k = new int*[maskc];   // allocate the result
 
-	maskc = strlen(key); // get te string length
-	int **k = new int*[maskc]; // allocate the result
+	// for each position in the array
+	for (int i = 0; i < maskc; ++i)
+	{
+		// get the raw key and next raw key
+		int _key = key[i];
+		int _next = key[(i + 1) % maskc];
 
-	// get the bitmask set for each character
-	for (int i = 0; i < maskc; ++i) k[i] = getmasks(key[i]);
+		// interlace it with the next raw key
+		_key ^= rot_8(_next, 4);
+
+		// multiply to extend interval
+		_key *= (key[i] ^ _key ^ _next) * 21143; // the literal is drawn from a large prime number to help evenly distribute resultant keys
+
+		// get the masks for the interlaced key
+		k[i] = getmasks(_key);
+	}
 
 	return k;
 }
@@ -70,7 +86,7 @@ void freemasks(int **masks, int maskc)
 
 void encrypt(char *data, int **masks, int maskc, int offset, int length, int maskoffset)
 {
-#define bitop(i) if ((set[i] & ch) != 0) res += P[i]
+#define bitop(i) if (set[i] & ch) res += P[i]
 
 	int res;  // the result of one iteration
 	int *set; // the mask set to use
@@ -102,7 +118,7 @@ void encrypt(char *data, int **masks, int maskc, int offset, int length, int mas
 }
 void decrypt(char *data, int **masks, int maskc, int offset, int length, int maskoffset)
 {
-#define bitop(i) if ((P[i] & ch) != 0) res += set[i]
+#define bitop(i) if (P[i] & ch) res += set[i]
 
 	int res;  // the result of one iteration
 	int *set; // the mask set to use
@@ -173,10 +189,8 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 	int maskc;
 	int **masks = getmasks(key, maskc);
 
-	// get the number of threads to create (full processor utilization)
-	int threadc = std::thread::hardware_concurrency() - 1;
-	// if for whatever reason that's negative, set it to zero
-	if (threadc < 0) threadc = 0;
+	// get the number of threads to create (#processors that aren't us) (make sure it's not negative for some reason)
+	const int threadc = std::max(std::thread::hardware_concurrency() - 1, 0u);
 
 	// allocate the threads and settings
 	std::thread *threads = threadc > 0 ? new std::thread[threadc] : nullptr;
@@ -184,10 +198,13 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 
 	// flag that marks that execution is going on
 	bool running = true;
-
+	
 	// initialize the threads and settings
 	for (int i = 0; i < threadc; ++i)
 	{
+		// initialize the settings object
+		settings[i].has_data = false;
+
 		// initialize the thread object
 		threads[i] = (std::thread)([processor, buffer, masks, maskc, &settings = settings[i], &running]()
 		{
@@ -207,11 +224,8 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 				std::this_thread::yield();
 			}
 		});
-
-		// initialize the settings object
-		settings[i].has_data = false;
 	}
-
+	
 	// -- and the fun begins -- //
 
 	try
@@ -228,7 +242,7 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 			std::streamsize len = in.gcount();
 			// if we read nothing, we're done
 			if (len == 0) break;
-
+			
 			// get width of each slice for a thread
 			std::streamsize width = len / (threadc + 1);
 			// if width is positive, distribute work load to the threads
@@ -249,8 +263,6 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 			// if we gave the threads work, wait for them to finish
 			if (width > 0) for (int i = 0; i < threadc; ++i)
 				while (settings[i].has_data) std::this_thread::yield();
-
-			std::cout << in_pos << ' ' << out_pos << '\n';
 
 			// clear out's state (reading to eof sets eof flag, which means we can't write the data back if in/out are the same file)
 			out.clear();
@@ -273,17 +285,10 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 
 				// output progress
 				*log <<
-					"processed " << std::setprecision(1) << std::fixed << c_progress << progress_units
+					std::setprecision(1) << std::fixed << c_progress << progress_units
 					<< '/' << std::setprecision(1) << std::fixed << c_total << total_units
-					<< " (" << std::setprecision(1) << std::fixed << (100 * c_progress / c_total) << "%)\n";
+					<< " (" << std::setprecision(1) << std::fixed << (100 * (double)progress / total) << "%)\n";
 			}
-		}
-
-		// if logging enabled
-		if (log)
-		{
-			// output completion message
-			*log << "operation completed\n";
 		}
 	}
 	// if we receive an error
