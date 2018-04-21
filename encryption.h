@@ -3,20 +3,11 @@
 
 #include <iostream>
 
-// gets the bitmask phase shift set of the specified key.
-// must use freemasks() on the result to dispose
-// key - the key for the bitmask set to get
-int* getmasks(int key);
-// frees resources allocated by getmasks()
-void freemasks(int *masks);
-
 // takes a string and converts it into an array of sets of bitmask phase shifts.
-// must use freemasks() on the result to dispose
+// must use delete[] on the result to dispose
 // key   - the string to use as the key
 // maskc - the number of sets of bitmasks in the result
-int** getmasks(const char *key, int &maskc);
-// frees resources allocated by getmasks()
-void freemasks(int **masks, int maskc);
+int* getmasks(const char *key, int &maskc);
 
 // ------------------------------------------
 
@@ -27,12 +18,12 @@ void freemasks(int **masks, int maskc);
 // offset     - the starting position in data array
 // length     - the number of bytes to process
 // maskoffset - the starting index of the mask set to use
-typedef void(*crypto_t)(char *data, int **masks, int maskc, int offset, int length, int maskoffset);
+typedef void(*crypto_t)(char *data, int *masks, int maskc, int offset, int length, int maskoffset);
 
 // encrypts the specified binary array with an array of mask sets (as from getmasks)
-void encrypt(char *data, int **masks, int maskc, int offset, int length, int maskoffset);
+void encrypt(char *data, int *masks, int maskc, int offset, int length, int maskoffset);
 // encrypts the specified binary array with an array of mask sets (as from getmasks)
-void decrypt(char *data, int **masks, int maskc, int offset, int length, int maskoffset);
+void decrypt(char *data, int *masks, int maskc, int offset, int length, int maskoffset);
 
 // ------------------------------------------
 

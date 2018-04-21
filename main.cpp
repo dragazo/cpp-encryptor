@@ -98,7 +98,7 @@ int main(int argc, const char **argv)
 	crypto_t                 crypto = nullptr;    // crypto function to use
 	const char              *password = nullptr;  // password to use
 	std::vector<const char*> paths;               // the provided paths
-
+	
 	// for each argument
 	for (int i = 1; i < argc; ++i)
 	{

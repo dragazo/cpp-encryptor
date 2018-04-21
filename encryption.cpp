@@ -18,44 +18,36 @@ constexpr int buffer_size = 1000000;
 static_assert(buffer_size < std::numeric_limits<int>::max(), "buffer index uses int. cannot exceed int maximum.");
 
 // a series of pre-loaded factorials
-constexpr int F[]{1, 2, 6, 24, 120, 720, 5040};
+constexpr int F[]{1, 1, 2, 6, 24, 120, 720, 5040};
 // a series of pre-loaded powers of 2
 constexpr int P[]{1, 2, 4, 8, 16, 32, 64, 128};
 
 // -------------------------------
 
-int* getmasks(int key)
+// gets the masks for an individual key
+void getmasks(int key, int *dest)
 {
 	// create a list of powers of 2 (represents the bit mask phase shifts for each bit in a byte)
 	std::vector<int> pos = {1, 2, 4, 8, 16, 32, 64, 128};
-	int *r = new int[8]; // allocate the result
-	key %= 40320;        // there are only 8! possibilities, so ensure key is in that range
+	key %= 40320; // there are only 8! possibilities, so ensure key is in that range
 
 	// get all 8 bitmasks
-	for (int i = 0; i < 7; ++i)
+	for (int i = 0; i < 8; ++i)
 	{
-		int res = key / F[6 - i];     // get the index of the bitmask
-		r[i] = pos[res];              // save it
-		pos.erase(pos.begin() + res); // remove it from the list
-		key -= res * F[6 - i];        // reduce key to put it in range for the next pass
+		int res = key / F[7 - i];     // get the index of the bitmask
+		dest[i] = pos[res];           // save it
+		pos.erase(pos.begin() + res); // remove it from the list       
+		key %= F[7 - i];              // reduce key to put it in range for the next pass
 	}
-	r[7] = pos[0];
-
-	// return resulting masks
-	return r;
 }
-void freemasks(int *masks)
+int* getmasks(const char *key, int &maskc)
 {
-	// free the masks
-	delete[] masks;
-}
+	maskc = strlen(key);            // get the string length
+	if (maskc == 0) return nullptr; // return null on empty
 
-int** getmasks(const char *key, int &maskc)
-{
-	maskc = strlen(key);         // get the string length
-	int **k = new int*[maskc];   // allocate the result
+	int *m = new int[maskc * 8]; // allocate the result
 
-	// for each position in the array
+	// for each set of 8 masks
 	for (int i = 0; i < maskc; ++i)
 	{
 		// get the raw key and next raw key
@@ -69,35 +61,28 @@ int** getmasks(const char *key, int &maskc)
 		_key *= (key[i] ^ _key ^ _next) * 21143; // the literal is drawn from a large prime number to help evenly distribute resultant keys
 
 		// get the masks for the interlaced key
-		k[i] = getmasks(_key);
+		getmasks(_key, m + i * 8);
 	}
 
-	return k;
-}
-void freemasks(int **masks, int maskc)
-{
-	// free each mask set
-	for (int i = 0; i < maskc; ++i) delete[] masks[i];
-	// free the overall array
-	delete[] masks;
+	return m;
 }
 
 // -------------------------------
 
-void encrypt(char *data, int **masks, int maskc, int offset, int length, int maskoffset)
+void encrypt(char *data, int *masks, int maskc, int offset, int length, int maskoffset)
 {
-#define bitop(i) if (set[i] & ch) res += P[i]
+//#define bitop(i) if (set[i] & ch) res += P[i]
+#define bitop(i) res |= ((set[i] & ch) != 0) << i
 
-	int res;  // the result of one iteration
-	int *set; // the mask set to use
-	int ch;   // the character being processed
+	int  res;                          // the result of one iteration
+	int *set = masks + maskoffset * 8; // the mask set to use
+	int  ch;                           // the character being processed
 
 	// for each byte up to len
-	for (int i = 0; i < length; ++i)
+	for (int i = 0; i < length; ++i, ++data)
 	{
-		res = 0;                               // zero the result
-		set = masks[(i + maskoffset) % maskc]; // get the mask set to use
-		ch = data[i + offset];                 // get the character being processed
+		res = 0;    // zero the result
+		ch = *data; // get the character being processed
 
 		// apply the phase shifts
 		// macro inlining (potentially faster, depending on optimizer)
@@ -111,25 +96,28 @@ void encrypt(char *data, int **masks, int maskc, int offset, int length, int mas
 		bitop(7);
 
 		// record the result
-		data[i + offset] = res;
+		*data = res;
+
+		// next pass
+		if ((set += 8) == masks + maskc * 8) set = masks;
 	}
 
 #undef bitop
 }
-void decrypt(char *data, int **masks, int maskc, int offset, int length, int maskoffset)
+void decrypt(char *data, int *masks, int maskc, int offset, int length, int maskoffset)
 {
-#define bitop(i) if (P[i] & ch) res += set[i]
+//#define bitop(i) if (P[i] & ch) res += set[i]
+#define bitop(i) res |= -((ch >> i) & 1) & set[i]
 
-	int res;  // the result of one iteration
-	int *set; // the mask set to use
-	int ch;   // the character to process
+	int  res;                          // the result of one iteration
+	int *set = masks + maskoffset * 8; // the mask set to use
+	int  ch;                           // the character being processed
 
 	// for each byte up to len
-	for (int i = 0; i < length; ++i)
+	for (int i = 0; i < length; ++i, ++data)
 	{
-		res = 0;                               // zero the result
-		set = masks[(i + maskoffset) % maskc]; // get the mask set to use
-		ch = data[i + offset];                 // get the character being processed
+		res = 0;    // zero the result
+		ch = *data; // get the character being processed
 
 		// apply the phase shifts
 		// macro inlining (potentially faster, depending on optimizer)
@@ -143,7 +131,10 @@ void decrypt(char *data, int **masks, int maskc, int offset, int length, int mas
 		bitop(7);
 
 		// record the result
-		data[i + offset] = res;
+		*data = res;
+
+		// next pass
+		if ((set += 8) == masks + maskc * 8) set = masks;
 	}
 
 #undef bitop
@@ -164,7 +155,7 @@ struct CryptoSettings
 void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t processor, std::ostream *log)
 {
 	// macro used for cleaning up after execution
-	#define clean { running = false; for (int i = 0; i < threadc; ++i) threads[i].join(); delete[] threads; delete[] settings; freemasks(masks, maskc); delete[] buffer; }
+	#define clean { running = false; for (int i = 0; i < threadc; ++i) threads[i].join(); delete[] threads; delete[] settings; delete[] masks; delete[] buffer; }
 
 	// -- initialize data -- //
 
@@ -187,7 +178,7 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 
 	// turn the key into masks
 	int maskc;
-	int **masks = getmasks(key, maskc);
+	int *masks = getmasks(key, maskc);
 
 	// get the number of threads to create (#processors that aren't us) (make sure it's not negative for some reason)
 	const int threadc = std::max(std::thread::hardware_concurrency() - 1, 0u);
