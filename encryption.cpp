@@ -14,13 +14,8 @@
 // the size of the buffer used during encryption
 constexpr int buffer_size = 1000000;
 
-// ensure that the the buffer size isn't stupid
-static_assert(buffer_size < std::numeric_limits<int>::max(), "buffer index uses int. cannot exceed int maximum.");
-
 // a series of pre-loaded factorials
 constexpr int F[]{1, 1, 2, 6, 24, 120, 720, 5040};
-// a series of pre-loaded powers of 2
-constexpr int P[]{1, 2, 4, 8, 16, 32, 64, 128};
 
 // -------------------------------
 
@@ -69,14 +64,13 @@ int* getmasks(const char *key, int &maskc)
 
 // -------------------------------
 
-void encrypt(char *data, int *masks, int maskc, int offset, int length, int maskoffset)
+void encrypt(char *data, const int *masks, int maskc, int offset, int length, int maskoffset)
 {
-//#define bitop(i) if (set[i] & ch) res += P[i]
 #define bitop(i) res |= ((set[i] & ch) != 0) << i
 
-	int  res;                          // the result of one iteration
-	int *set = masks + maskoffset * 8; // the mask set to use
-	int  ch;                           // the character being processed
+	int        res;                          // the result of one iteration
+	const int *set = masks + maskoffset * 8; // the mask set to use
+	int        ch;                           // the character being processed
 
 	data += offset; // increment data up to start
 
@@ -106,14 +100,13 @@ void encrypt(char *data, int *masks, int maskc, int offset, int length, int mask
 
 #undef bitop
 }
-void decrypt(char *data, int *masks, int maskc, int offset, int length, int maskoffset)
+void decrypt(char *data, const int *masks, int maskc, int offset, int length, int maskoffset)
 {
-//#define bitop(i) if (P[i] & ch) res += set[i]
 #define bitop(i) res |= -((ch >> i) & 1) & set[i]
 
-	int  res;                          // the result of one iteration
-	int *set = masks + maskoffset * 8; // the mask set to use
-	int  ch;                           // the character being processed
+	int        res;                          // the result of one iteration
+	const int *set = masks + maskoffset * 8; // the mask set to use
+	int        ch;                           // the character being processed
 
 	data += offset; // increment data up to start
 

@@ -18,12 +18,12 @@ int* getmasks(const char *key, int &maskc);
 // offset     - the starting position in data array
 // length     - the number of bytes to process
 // maskoffset - the starting index of the mask set to use
-typedef void(*crypto_t)(char *data, int *masks, int maskc, int offset, int length, int maskoffset);
+typedef void(*crypto_t)(char *data, const int *masks, int maskc, int offset, int length, int maskoffset);
 
 // encrypts the specified binary array with an array of mask sets (as from getmasks)
-void encrypt(char *data, int *masks, int maskc, int offset, int length, int maskoffset);
+void encrypt(char *data, const int *masks, int maskc, int offset, int length, int maskoffset);
 // encrypts the specified binary array with an array of mask sets (as from getmasks)
-void decrypt(char *data, int *masks, int maskc, int offset, int length, int maskoffset);
+void decrypt(char *data, const int *masks, int maskc, int offset, int length, int maskoffset);
 
 // ------------------------------------------
 
