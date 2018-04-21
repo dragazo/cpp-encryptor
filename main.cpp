@@ -56,33 +56,22 @@ bool process(std::istream &in, std::ostream &out, const char *password, crypto_t
 }
 
 #ifdef _DEBUG
-// runs diagnostics of the supplied key
-void diag(int key)
-{
-	int *masks = getmasks(key);
-
-	std::cout << std::setw(10) << key << " -> ";
-	for (int i = 0; i < 8; ++i) std::cout << std::setw(3) << masks[i] << ' ';
-	std::cout << '\n';
-
-	freemasks(masks);
-}
 // runs diagnostics on the supplied string key
 void diag(const char *key)
 {
 	int maskc;
-	int **masks = getmasks(key, maskc);
+	int *masks = getmasks(key, maskc);
 
 	std::cout << key << " ->\n";
 	for (int m = 0; m < maskc; ++m)
 	{
-		for (int i = 0; i < 8; ++i) std::cout << std::setw(3) << masks[m][i] << ' ';
+		for (int i = 0; i < 8; ++i) std::cout << std::setw(3) << masks[m * 8 + i] << ' ';
 		std::cout << '\n';
 	}
 
 	std::cout << '\n';
 
-	freemasks(masks, maskc);
+	delete[] masks;
 }
 #endif
 

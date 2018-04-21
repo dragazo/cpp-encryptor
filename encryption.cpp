@@ -78,6 +78,8 @@ void encrypt(char *data, int *masks, int maskc, int offset, int length, int mask
 	int *set = masks + maskoffset * 8; // the mask set to use
 	int  ch;                           // the character being processed
 
+	data += offset; // increment data up to start
+
 	// for each byte up to len
 	for (int i = 0; i < length; ++i, ++data)
 	{
@@ -112,6 +114,8 @@ void decrypt(char *data, int *masks, int maskc, int offset, int length, int mask
 	int  res;                          // the result of one iteration
 	int *set = masks + maskoffset * 8; // the mask set to use
 	int  ch;                           // the character being processed
+
+	data += offset; // increment data up to start
 
 	// for each byte up to len
 	for (int i = 0; i < length; ++i, ++data)
@@ -233,7 +237,7 @@ void cryptf(std::istream &in, std::ostream &out, const char *key, crypto_t proce
 			std::streamsize len = in.gcount();
 			// if we read nothing, we're done
 			if (len == 0) break;
-			
+
 			// get width of each slice for a thread
 			std::streamsize width = len / (threadc + 1);
 			// if width is positive, distribute work load to the threads
