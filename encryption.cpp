@@ -278,17 +278,16 @@ void crypt(std::istream &in, std::ostream &out, const char *key, crypto_t crypto
 				const char *progress_units;
 				double c_progress = compact_filesize((double)progress, progress_units);
 
-				// output progress
+				// output progress and go back to start of line
 				*log
-					<< '\r' // go back to start of line
 					<< std::setprecision(1) << std::fixed << std::setw(6) << c_progress << progress_units << '/'
 					<< std::setprecision(1) << std::fixed << std::setw(6) << c_total << total_units << " ("
-					<< std::setprecision(1) << std::fixed << std::setw(5) << (100 * (double)progress / total) << "%)";
+					<< std::setprecision(1) << std::fixed << std::setw(5) << (100.0 * progress / total) << "%)\r";
 			}
 		}
 
 		// clear the line
-		if (log) *log << "\r                             \r";
+		if (log) *log << "                             \r";
 	}
 	// if we receive an error
 	catch (...)
@@ -308,26 +307,27 @@ void crypt(std::istream &in, std::ostream &out, const char *key, crypto_t crypto
 
 bool cryptf(const char *in_path, const char *out_path, const char *key, crypto_t crypto, std::ostream *log)
 {
-	// make sure we're not going to save over the input (this should use the in-place version of cryptf)
-	if (fs::equivalent(in_path, out_path))
-	{
-		if (log) *log << "attempt to save over input: \"" << in_path << "\" -> \"" << out_path << "\"\n";
-		return false;
-	}
-
-	// open the files
+	// open input
 	std::ifstream in(in_path, std::ios::binary);
-	std::ofstream out(out_path, std::ios::trunc | std::ios::binary);
-
-	// make sure the files were opened
 	if (!in.is_open())
 	{
-		if (log) *log << "failed to open file \"" << in_path << "\" for reading\n";
+		if (log) *log << "FAILURE: failed to open file \"" << in_path << "\" for reading\n";
 		return false;
 	}
+
+	// make sure we're not going to save over the input
+	// fs::equivalent() can throw if either path doesn't exist, so we need to check out_path before calling it
+	if (fs::exists(out_path) && fs::equivalent(in_path, out_path))
+	{
+		if (log) *log << "FAILURE: attempt to save over input: \"" << in_path << "\" -> \"" << out_path << "\"\n";
+		return false;
+	}
+
+	// open output
+	std::ofstream out(out_path, std::ios::trunc | std::ios::binary);
 	if (!out.is_open())
 	{
-		if (log) *log << "failed to open file \"" << out_path << "\" for writing\n";
+		if (log) *log << "FAILURE: failed to open file \"" << out_path << "\" for writing\n";
 		return false;
 	}
 
@@ -348,7 +348,7 @@ bool cryptf(const char *path, const char *key, crypto_t crypto, std::ostream *lo
 	// make sure we opened the file
 	if (!f.is_open())
 	{
-		if (log) *log << "failed to open file \"" << path << "\" for reading and writing\n";
+		if (log) *log << "FAILURE: failed to open file \"" << path << "\" for reading and writing\n";
 		return false;
 	}
 

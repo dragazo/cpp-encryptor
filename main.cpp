@@ -46,6 +46,11 @@ int main(int argc, const char **argv)
 {
 	#define usage_err { std::cout << "usage error - see -h for help\n"; return 0; }
 
+	#define __help { print_help(std::cout); return 0; }
+	#define __crypto(c) { if(crypto) usage_err; crypto = (c); }
+	#define __password { if(password) usage_err; if (i + 1 >= argc) { std::cout << "option " << argv[i] << " expected a password to follow\n"; return 0; } password = argv[++i]; }
+	#define __batch { batch = true; }
+
 	// -- parse terminal args -- //
 
 	std::ostream            *log = &std::cout;   // stream to use for logging
@@ -57,28 +62,35 @@ int main(int argc, const char **argv)
 	// for each argument
 	for (int i = 1; i < argc; ++i)
 	{
-		// -h or --help displays help
-		if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) { print_help(std::cout); return 0; }
-
-		// -e or --encrypt specifies encrypt
-		else if (strcmp(argv[i], "-e") == 0 || strcmp(argv[i], "--encrypt") == 0) { if(crypto) usage_err; crypto = encrypt; }
-		// -d or --decrypt specifies decrypt
-		else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--decrypt") == 0) { if (crypto) usage_err; crypto = decrypt; }
-
-		// -p or --password specifies password as next arg
-		else if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--password") == 0)
+		// do the long names
+		if (strcmp(argv[i], "--help") == 0) __help
+		else if (strcmp(argv[i], "--encrypt") == 0) __crypto(encrypt)
+		else if (strcmp(argv[i], "--decrypt") == 0) __crypto(decrypt)
+		else if (strcmp(argv[i], "--password") == 0) __password
+		else if (strcmp(argv[i], "--batch") == 0) __batch
+		else if (strcmp(argv[i], "--") == 0); // no-op separator
+		// do the short names
+		else if (argv[i][0] == '-')
 		{
-			if (password) usage_err;
-			// make sure there's actually an arg after this
-			if (i + 1 >= argc) { std::cout << "option " << argv[i] << " expected a password to follow\n"; return 0; }
-			password = argv[++i];
+			// for each 1-char flag (can string them together if desired)
+			for (const char *pos = argv[i] + 1; *pos; ++pos)
+			{
+				// switch on the character
+				switch (*pos)
+				{
+				case 'h': __help; break;
+				case 'e': __crypto(encrypt); break;
+				case 'd': __crypto(decrypt); break;
+				case 'p': __password; break;
+				case 'b': __batch; break;
+
+				// otherwise flag was unknown
+				default: std::cout << "unknown option '" << *pos << "'\n"; usage_err;
+				}
+			}
 		}
-
-		// -b or --batch specifies batch processing
-		else if (strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--batch") == 0) { batch = true; }
-
-		// otherise if it's not -- (no-op spacer) it's a path
-		else if (strcmp(argv[i], "--") != 0) paths.push_back(argv[i]);
+		// otherwise it's a file path
+		else paths.push_back(argv[i]);
 	}
 
 	// ensure we got a mode and password
@@ -102,6 +114,4 @@ int main(int argc, const char **argv)
 
 	// no errors
 	return 0;
-
-	#undef usage_err
 }
