@@ -5,6 +5,9 @@
 #include <iomanip>
 #include "encryption.h"
 
+// size of buffer to create
+constexpr int buffer_size = 1024 * 1024;
+
 // outputs the help message
 void print_help(std::ostream &ostr)
 {
@@ -12,12 +15,12 @@ void print_help(std::ostream &ostr)
 
 	ostr << "usage: cpp_encryptor [<options>] [--] <pathspec>...\n\n";
 
-	ostr << "    -h, --help                    shows this help message\n";
-	ostr << "    -e, --encrypt                 specifies that files should be encrypted\n";
-	ostr << "    -d, --decrypt                 specifies that files should be decrypted\n";
-	ostr << "    -p, --password <password>     specifies the password to use\n";
-	ostr << "    -b, --batch                   specifies that each file should be processed in-place.\n";
-	ostr << "                                  if not present, <pathspec> must contain exactly 2 files (in and out)\n";
+	ostr << "    -h, --help        shows this help message\n";
+	ostr << "    -e, --encrypt     specifies that files should be encrypted\n";
+	ostr << "    -d, --decrypt     specifies that files should be decrypted\n";
+	ostr << "    -p <password>     specifies the password to use\n";
+	ostr << "    -r                processes files/directories in-place recursively\n";
+	ostr << "    -t                displays elapsed time after completion\n";
 
 	ostr << '\n';
 }
@@ -44,17 +47,19 @@ void diag(const char *key)
 
 int main(int argc, const char **argv)
 {
-	#define usage_err { std::cout << "usage error - see -h for help\n"; return 0; }
+	using namespace std::chrono;
+	typedef high_resolution_clock hrc;
 
 	#define __help { print_help(std::cout); return 0; }
-	#define __crypto(c) { if(crypto) usage_err; crypto = (c); }
-	#define __password { if(password) usage_err; if (i + 1 >= argc) { std::cout << "option " << argv[i] << " expected a password to follow\n"; return 0; } password = argv[++i]; }
-	#define __batch { batch = true; }
+	#define __crypto(c) { if(crypto) { std::cerr << "cannot respecify mode\n"; return 0; } crypto = (c); }
+	#define __password { if(password) { std::cerr << "cannot respecify password\n"; return 0; } if (i + 1 >= argc) { std::cerr << "option " << argv[i] << " expected a password to follow\n"; return 0; } password = argv[++i]; }
+	#define __recursive { recursive = true; }
+	#define __time { time = true; }
 
 	// -- parse terminal args -- //
 
-	std::ostream            *log = &std::cout;   // stream to use for logging
-	bool                     batch = false;      // flags that we're batch processing the files
+	bool                     recursive = false;  // flags that we're batch processing the files
+	bool                     time = false;       // flags that we're batch processing the files
 	crypto_t                 crypto = nullptr;   // crypto function to use
 	const char              *password = nullptr; // password to use
 	std::vector<const char*> paths;              // the provided paths
@@ -66,8 +71,6 @@ int main(int argc, const char **argv)
 		if (strcmp(argv[i], "--help") == 0) __help
 		else if (strcmp(argv[i], "--encrypt") == 0) __crypto(encrypt)
 		else if (strcmp(argv[i], "--decrypt") == 0) __crypto(decrypt)
-		else if (strcmp(argv[i], "--password") == 0) __password
-		else if (strcmp(argv[i], "--batch") == 0) __batch
 		else if (strcmp(argv[i], "--") == 0); // no-op separator
 		// do the short names
 		else if (argv[i][0] == '-')
@@ -82,10 +85,11 @@ int main(int argc, const char **argv)
 				case 'e': __crypto(encrypt); break;
 				case 'd': __crypto(decrypt); break;
 				case 'p': __password; break;
-				case 'b': __batch; break;
+				case 'r': __recursive; break;
+				case 't': __time; break;
 
 				// otherwise flag was unknown
-				default: std::cout << "unknown option '" << *pos << "'\n"; usage_err;
+				default: std::cerr << "unknown option '" << *pos << "'. see -h for help\n"; return 0;
 				}
 			}
 		}
@@ -94,23 +98,46 @@ int main(int argc, const char **argv)
 	}
 
 	// ensure we got a mode and password
-	if (!crypto || !password) usage_err;
+	if (!crypto) { std::cerr << "expected -e or -d. see -h for help\n"; return 0; }
+	if (!password) { std::cerr << "expected -p. see -h for help\n"; return 0; };
 
-	// if batch processing
-	if (batch)
+	// generate the worker
+	ParallelCrypto worker;
+	worker.crypto = crypto;
+	worker.masks = getmasks(password, worker.maskc);
+	
+	// create a buffer
+	char *buffer = new char[buffer_size];
+
+	// begin timing
+	hrc::time_point start = hrc::now();
+
+	// if recursive processing
+	if (recursive)
 	{
-		// process each file in-place
-		for (int i = 0; i < paths.size(); ++i) cryptf(paths[i], password, crypto, log);
+		// process each pathspec each recursively
+		for (unsigned int i = 0; i < paths.size(); ++i) cryptf_recursive(paths[i], worker, buffer, buffer_size, &std::cout);
 	}
 	// otherwise doing from-to copy
 	else
 	{
 		// ensure there were exactly 2 paths specified
-		if (paths.size() != 2) usage_err;
+		if (paths.size() != 2) { std::cerr << "non-recursive mode requires exactly 2 paths (input and output). see -h for help\n"; return 0; }
 
 		// process the file
-		cryptf(paths[0], paths[1], password, crypto, log);
+		cryptf(paths[0], paths[1], worker, buffer, buffer_size, &std::cout);
 	}
+
+	// display elapsed time if timing flag set
+	if (time)
+	{
+		long long t = duration_cast<std::chrono::milliseconds>(hrc::now() - start).count();
+		std::cout << "elapsed time: " << t << "ms\n";
+	}
+
+	// free resources
+	delete[] worker.masks;
+	delete[] buffer;
 
 	// no errors
 	return 0;

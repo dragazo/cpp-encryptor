@@ -18,10 +18,7 @@ namespace fs = std::filesystem;
 // rotates an 8-bit value v to the right by n bits
 #define rot_8(v, n) ((v >> n) | (v << n) & 0xff)
 
-// the size of the buffer used during encryption
-constexpr int buffer_size = 1000000;
-
-// a series of pre-loaded factorials
+// pre-loaded factorials
 constexpr int F[]{1, 1, 2, 6, 24, 120, 720, 5040};
 
 // -------------------------------
@@ -146,22 +143,98 @@ void decrypt(char *data, const int *masks, int maskc, int offset, int length, in
 
 // -------------------------------
 
-// holds the settings used by a thread during a crypto cycle
-struct CryptoSettings
+ParallelCrypto::ParallelCrypto()
 {
-	bool has_data;  // flags that there is data to process
+	// flag as active state
+	active = true;
 
-	int start;      // the index in buffer to start at
-	int width;      // the number of bytes to process
-	int maskoffset; // the index of the mask to use for the first byte
-};
+	// get the number of threads to create (#processors that aren't us) (make sure it's not negative for some reason)
+	threadc = std::max(std::thread::hardware_concurrency() - 1, 0u);
 
-void crypt(std::istream &in, std::ostream &out, const char *key, crypto_t crypto, std::ostream *log)
+	// allocate the threads and settings
+	threads = threadc > 0 ? new std::thread[threadc] : nullptr;
+	has_data = threadc > 0 ? new bool[threadc] : nullptr;
+
+	// initialize the threads and settings
+	for (int i = 0; i < threadc; ++i)
+	{
+		// initialize the settings object
+		has_data[i] = false;
+
+		// initialize the thread object
+		threads[i] = (std::thread)([this, i]()
+		{
+			// if we're still running
+			while (active)
+			{
+				// if we have stuff to do
+				if (has_data[i])
+				{
+					// process the data
+					crypto(data, masks, maskc, width * i, width, (maskoff + width * i) % maskc);
+					// mark that we did it
+					has_data[i] = false;
+				}
+
+				// might as well end our time slice (otherwise would just be a spin wait)
+				std::this_thread::yield();
+			}
+		});
+	}
+
+	// null user-provided settings (safety)
+	crypto = nullptr;
+	masks = nullptr;
+	maskc = 0;
+	maskoff = 0;
+}
+ParallelCrypto::~ParallelCrypto()
 {
-	// macro used for cleaning up after execution
-	#define clean { running = false; for (int i = 0; i < threadc; ++i) threads[i].join(); delete[] threads; delete[] settings; delete[] masks; delete[] buffer; }
+	// request thread stop
+	active = false;
 
-	// -- initialize data -- //
+	// join workers
+	for (int i = 0; i < threadc; ++i) threads[i].join();
+	
+	// free private resources
+	delete[] threads;
+	delete[] has_data;
+
+	// null them to ensure destroying multiple times is safe
+	threads = nullptr;
+	has_data = nullptr;
+
+	// zero thread count
+	threadc = 0;
+}
+
+void ParallelCrypto::process(char *buffer, int start, int count)
+{
+	// account for start index
+	buffer += start;
+
+	// store data data
+	data = buffer;
+	width = count / (threadc + 1); // threadc + 1 because we'll be doing a slice
+
+	// if width is positive, distribute work load to the threads
+	if (width > 0) for (int i = 0; i < threadc; ++i) has_data[i] = true;
+
+	// we do the last slice ourselves
+	crypto(data, masks, maskc, width * threadc, count - width * threadc, (maskoff + width * threadc) % maskc);
+
+	// wait for the threads to finish
+	for (int i = 0; i < threadc; ++i) while (has_data[i]) std::this_thread::yield();
+
+	// bump up offset
+	maskoff = (maskoff + count) % maskc;
+}
+
+// -------------------------------
+
+void crypt(std::istream &in, std::ostream &out, ParallelCrypto &worker, char *buffer, int buflen, std::ostream *log)
+{
+	// -- load stats -- //
 
 	std::streampos in_pos = in.tellg();   // the position in the input file (we need to store these in case in/out are the same file)
 	std::streampos out_pos = out.tellp(); // the position in the output file
@@ -177,138 +250,62 @@ void crypt(std::istream &in, std::ostream &out, const char *key, crypto_t crypto
 	const char *total_units;
 	double c_total = compact_filesize((double)total, total_units);
 
-	// allocate the data buffer
-	char *buffer = new char[buffer_size];
-
-	// turn the key into masks
-	int maskc;
-	int *masks = getmasks(key, maskc);
-
-	// get the number of threads to create (#processors that aren't us) (make sure it's not negative for some reason)
-	const int threadc = std::max(std::thread::hardware_concurrency() - 1, 0u);
-
-	// allocate the threads and settings
-	std::thread *threads = threadc > 0 ? new std::thread[threadc] : nullptr;
-	CryptoSettings *settings = threadc > 0 ? new CryptoSettings[threadc] : nullptr;
-
-	// flag that marks that execution is going on
-	bool running = true;
-	
-	// initialize the threads and settings
-	for (int i = 0; i < threadc; ++i)
-	{
-		// initialize the settings object
-		settings[i].has_data = false;
-
-		// initialize the thread object
-		threads[i] = (std::thread)([crypto, buffer, masks, maskc, &settings = settings[i], &running]()
-		{
-			// if we're still running
-			while (running)
-			{
-				// if we have stuff to do
-				if (settings.has_data)
-				{
-					// process the data
-					crypto(buffer, masks, maskc, settings.start, settings.width, settings.maskoffset);
-					// mark that we did it
-					settings.has_data = false;
-				}
-
-				// might as well end our time slice (otherwise would just be a spin wait)
-				std::this_thread::yield();
-			}
-		});
-	}
-	
 	// -- and the fun begins -- //
 
-	try
+	// reset mask offset
+	worker.maskoff = 0;
+
+	while (true)
 	{
-		// loop over the mask offset (each pass consumes buffer_size, so increment by that)
-		for (int offset = 0; ; offset = (offset + buffer_size) % maskc)
+		// seek read pos (required if in/out are the same file)
+		in.seekg(in_pos);
+		// read data from input
+		in.read(buffer, buflen);
+
+		// get the number of bytes read
+		std::streamsize len = in.gcount();
+		// if we read nothing, we're done
+		if (len == 0) break;
+
+		// process the data
+		worker.process(buffer, 0, (int)len);
+
+		// clear out's state (reading to eof sets eof flag, which means we can't write the data back if in/out are the same file)
+		out.clear();
+		// seek write pos (required if in/out are the same file)
+		out.seekp(out_pos);
+		// write the result back to output
+		out.write(buffer, len);
+
+		// increment things as needed
+		progress += len;
+		in_pos += len;
+		out_pos += len;
+
+		// if logging enabled
+		if (log)
 		{
-			// seek read pos (required if in/out are the same file)
-			in.seekg(in_pos);
-			// read data from input
-			in.read(buffer, buffer_size);
+			// compact the progress size
+			const char *progress_units;
+			double c_progress = compact_filesize((double)progress, progress_units);
 
-			// get the number of bytes read
-			std::streamsize len = in.gcount();
-			// if we read nothing, we're done
-			if (len == 0) break;
-
-			// get width of each slice for a thread
-			std::streamsize width = len / (threadc + 1);
-			// if width is positive, distribute work load to the threads
-			if (width > 0) for (int i = 0; i < threadc; ++i)
-			{
-				// set up their workload
-				settings[i].start = width * i;
-				settings[i].width = width;
-				settings[i].maskoffset = (offset + width * i) % maskc;
-
-				// flag that they have data
-				settings[i].has_data = true;
-			}
-
-			// we do the last slice ourselves
-			crypto(buffer, masks, maskc, width * threadc, len - width * threadc, (offset + width * threadc) % maskc);
-
-			// if we gave the threads work, wait for them to finish
-			if (width > 0) for (int i = 0; i < threadc; ++i)
-				while (settings[i].has_data) std::this_thread::yield();
-
-			// clear out's state (reading to eof sets eof flag, which means we can't write the data back if in/out are the same file)
-			out.clear();
-			// seek write pos (required if in/out are the same file)
-			out.seekp(out_pos);
-			// write the result back to output
-			out.write(buffer, len);
-			
-			// increment things as needed
-			progress += len;
-			in_pos += len;
-			out_pos += len;
-
-			// if logging enabled
-			if (log)
-			{
-				// compact the progress size
-				const char *progress_units;
-				double c_progress = compact_filesize((double)progress, progress_units);
-
-				// output progress and go back to start of line
-				*log
-					<< std::setprecision(1) << std::fixed << std::setw(6) << c_progress << progress_units << '/'
-					<< std::setprecision(1) << std::fixed << std::setw(6) << c_total << total_units << " ("
-					<< std::setprecision(1) << std::fixed << std::setw(5) << (100.0 * progress / total) << "%)\r";
-			}
+			// output progress and go back to start of line
+			*log
+				<< std::setprecision(1) << std::fixed << std::setw(6) << c_progress << progress_units << '/'
+				<< std::setprecision(1) << std::fixed << std::setw(6) << c_total << total_units << " ("
+				<< std::setprecision(1) << std::fixed << std::setw(5) << (100.0 * progress / total) << "%)\r";
 		}
-
-		// clear the line
-		if (log) *log << "                             \r";
-	}
-	// if we receive an error
-	catch (...)
-	{
-		// clean up (because C++ doesn't have a "finally block" concept, duplicate code is the only way to preserve exception typing)
-		clean;
-
-		// throw whatever error we got
-		throw;
 	}
 
-	// clean up
-	clean;
-
-	#undef clean
+	// clear the line
+	if (log) *log << "                             \r";
 }
 
-bool cryptf(const char *in_path, const char *out_path, const char *key, crypto_t crypto, std::ostream *log)
+// opens the files and displays a success/error message. returns true on success
+bool openf(const char *in_path, const char *out_path, std::ifstream &in, std::ofstream &out, std::ostream *log = nullptr)
 {
 	// open input
-	std::ifstream in(in_path, std::ios::binary);
+	in = std::ifstream(in_path, std::ios::binary);
 	if (!in.is_open())
 	{
 		if (log) *log << "FAILURE: failed to open file \"" << in_path << "\" for reading\n";
@@ -324,26 +321,23 @@ bool cryptf(const char *in_path, const char *out_path, const char *key, crypto_t
 	}
 
 	// open output
-	std::ofstream out(out_path, std::ios::trunc | std::ios::binary);
+	out = std::ofstream(out_path, std::ios::trunc | std::ios::binary);
 	if (!out.is_open())
 	{
 		if (log) *log << "FAILURE: failed to open file \"" << out_path << "\" for writing\n";
 		return false;
 	}
 
-	// print header
+	// print success header (for file processing)
 	if (log) *log << "processing \"" << in_path << "\" -> \"" << out_path << "\"\n";
-
-	// hand off to stream function
-	crypt(in, out, key, crypto, log);
 
 	// success
 	return true;
 }
-bool cryptf(const char *path, const char *key, crypto_t crypto, std::ostream *log)
+bool openf(const char *path, std::fstream &f, std::ostream *log = nullptr)
 {
 	// open the file
-	std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
+	f = std::fstream(path, std::ios::in | std::ios::out | std::ios::binary);
 
 	// make sure we opened the file
 	if (!f.is_open())
@@ -352,27 +346,57 @@ bool cryptf(const char *path, const char *key, crypto_t crypto, std::ostream *lo
 		return false;
 	}
 
-	// print header
-	if(log) *log << "processing \"" << path << "\"\n";
-
-	// hand off to stream function
-	crypt(f, f, key, crypto, log);
+	// print success header (for file processing)
+	if (log) *log << "processing \"" << path << "\"\n";
 
 	// success
 	return true;
 }
-int cryptf_recursive(const char *root_path, const char *key, crypto_t crypto, std::ostream *log)
+
+bool cryptf(const char *in_path, const char *out_path, ParallelCrypto &worker, char *buffer, int buflen, std::ostream *log)
+{
+	// open the files
+	std::ifstream in;
+	std::ofstream out;
+	if (!openf(in_path, out_path, in, out, log)) return false;
+
+	// hand off to stream function
+	crypt(in, out, worker, buffer, buflen, log);
+	return true;
+}
+bool cryptf(const char *path, ParallelCrypto &worker, char *buffer, int buflen, std::ostream *log)
+{
+	// open the file
+	std::fstream f;
+	if (!openf(path, f, log)) return false;
+
+	// hand off to stream function
+	crypt(f, f, worker, buffer, buflen, log);
+	return true;
+}
+
+int cryptf_recursive(const char *root_path, ParallelCrypto &worker, char *buffer, int buflen, std::ostream *log)
 {
 	int successes = 0; // number of successful operations
 
-	// for each item recursively
-	for (const fs::directory_entry &entry : fs::recursive_directory_iterator(root_path))
+	// if it's a file, process it
+	if (fs::is_regular_file(root_path))
 	{
-		// if this is a file (current compiler aparently doesn't define the member func versions, so use the function versions)
-		if (fs::is_regular_file(entry.status()))
+		
+		if (cryptf(root_path, worker, buffer, buflen, log)) ++successes;
+	}
+	// if it's a directory, process contents recursively
+	else if (fs::is_directory(root_path))
+	{
+		// for each item recursively
+		for (const fs::directory_entry &entry : fs::recursive_directory_iterator(root_path))
 		{
-			// hand off to cryptf
-			if (cryptf(entry.path().generic_string().c_str(), key, crypto, log)) ++successes;
+			// if this is a file 
+			if (fs::is_regular_file(entry.status()))
+			{
+				// hand off to cryptf
+				if (cryptf(entry.path().generic_string().c_str(), worker, buffer, buflen, log)) ++successes;
+			}
 		}
 	}
 
