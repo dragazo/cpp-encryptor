@@ -3,6 +3,7 @@
 
 #include <iostream>
 #include <thread>
+#include <atomic>
 
 // takes a string and converts it into an array of sets of bitmask phase shifts.
 // must use delete[] on the result to dispose
@@ -33,10 +34,10 @@ class ParallelCrypto
 {
 private: // private data (self-managed)
 
-	bool            active;   // flags that this object is still in use
-	int             threadc;  // number of threads
-	std::thread    *threads;  // threads to use
-	bool           *has_data; // settings for each thread
+	bool               active;   // flags that this object is still in use
+	int                threadc;  // number of threads
+	std::thread       *threads;  // threads to use
+	std::atomic<bool> *has_data; // settings for each thread
 
 	char *data;  // data array (not allocated)
 	int   width; // width of a data slice

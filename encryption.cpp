@@ -6,6 +6,7 @@
 #include <thread>
 #include <algorithm>
 #include <filesystem>
+#include <atomic>
 #include "encryption.h"
 #include "filesize.h"
 
@@ -153,7 +154,7 @@ ParallelCrypto::ParallelCrypto()
 
 	// allocate the threads and settings
 	threads = threadc > 0 ? new std::thread[threadc] : nullptr;
-	has_data = threadc > 0 ? new bool[threadc] : nullptr;
+	has_data = threadc > 0 ? new std::atomic<bool>[threadc] : nullptr;
 
 	// initialize the threads and settings
 	for (int i = 0; i < threadc; ++i)

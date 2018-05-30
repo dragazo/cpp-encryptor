@@ -12,7 +12,7 @@ constexpr int buffer_size = 1024 * 1024;
 void print_help(std::ostream &ostr)
 {
 	ostr << '\n';
-
+	
 	ostr << "usage: cpp_encryptor [<options>] [--] <pathspec>...\n\n";
 
 	ostr << "    -h, --help        shows this help message\n";
