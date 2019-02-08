@@ -30,7 +30,7 @@ void print_help(std::ostream &ostr)
 void diag(const char *key)
 {
 	int maskc;
-	int *masks = getmasks(key, maskc);
+	std::unique_ptr<int[]> masks = getmasks(key, maskc);
 
 	std::cout << key << " ->\n";
 	for (int m = 0; m < maskc; ++m)
@@ -38,31 +38,26 @@ void diag(const char *key)
 		for (int i = 0; i < 8; ++i) std::cout << std::setw(3) << masks[m * 8 + i] << ' ';
 		std::cout << '\n';
 	}
-
 	std::cout << '\n';
-
-	delete[] masks;
 }
 #endif
 
 int main(int argc, const char **argv)
 {
-	using namespace std::chrono;
-	typedef high_resolution_clock hrc;
-
 	#define __help { print_help(std::cout); return 0; }
-	#define __crypto(c) { if(crypto) { std::cerr << "cannot respecify mode\n"; return 0; } crypto = (c); }
-	#define __password { if(password) { std::cerr << "cannot respecify password\n"; return 0; } if (i + 1 >= argc) { std::cerr << "option " << argv[i] << " expected a password to follow\n"; return 0; } password = argv[++i]; }
+	#define __crypto(c) { if (has_mode) { std::cerr << "cannot respecify mode\n"; return 0; } has_mode = true; mode = ParallelCrypto::mode::c; }
+	#define __password { if (password) { std::cerr << "cannot respecify password\n"; return 0; } if (i + 1 >= argc) { std::cerr << "option " << argv[i] << " expected a password to follow\n"; return 0; } password = argv[++i]; }
 	#define __recursive { recursive = true; }
 	#define __time { time = true; }
 
 	// -- parse terminal args -- //
 
-	bool                     recursive = false;  // flags that we're batch processing the files
-	bool                     time = false;       // flags that we're batch processing the files
-	crypto_t                 crypto = nullptr;   // crypto function to use
-	const char              *password = nullptr; // password to use
-	std::vector<const char*> paths;              // the provided paths
+	bool                           recursive = false;  // flags that we're batch processing the files
+	bool                           time = false;       // flags that we're batch processing the files
+	const char                    *password = nullptr; // password to use
+	bool                           has_mode = false;   // marks if mode is valid
+	ParallelCrypto::mode           mode = ParallelCrypto::mode::encrypt; // crypto mode to use
+	std::vector<const char*>       paths;              // the provided paths
 	
 	// for each argument
 	for (int i = 1; i < argc; ++i)
@@ -98,25 +93,23 @@ int main(int argc, const char **argv)
 	}
 
 	// ensure we got a mode and password
-	if (!crypto) { std::cerr << "expected -e or -d. see -h for help\n"; return 0; }
+	if (!has_mode) { std::cerr << "expected -e or -d. see -h for help\n"; return 0; }
 	if (!password) { std::cerr << "expected -p. see -h for help\n"; return 0; };
 
-	// generate the worker
-	ParallelCrypto worker;
-	worker.crypto = crypto;
-	worker.masks = getmasks(password, worker.maskc);
+	// generate the worker with the proper password and mode
+	ParallelCrypto worker(password, mode);
 	
 	// create a buffer
-	char *buffer = new char[buffer_size];
+	std::unique_ptr<char[]> buffer = std::make_unique<char[]>(buffer_size);
 
 	// begin timing
-	hrc::time_point start = hrc::now();
+	auto start = std::chrono::high_resolution_clock::now();
 
 	// if recursive processing
 	if (recursive)
 	{
-		// process each pathspec each recursively
-		for (unsigned int i = 0; i < paths.size(); ++i) cryptf_recursive(paths[i], worker, buffer, buffer_size, &std::cout);
+		// process each pathspec recursively
+		for (std::size_t i = 0; i < paths.size(); ++i) cryptf_recursive(paths[i], worker, buffer.get(), buffer_size, &std::cout);
 	}
 	// otherwise doing from-to copy
 	else
@@ -125,19 +118,15 @@ int main(int argc, const char **argv)
 		if (paths.size() != 2) { std::cerr << "non-recursive mode requires exactly 2 paths (input and output). see -h for help\n"; return 0; }
 
 		// process the file
-		cryptf(paths[0], paths[1], worker, buffer, buffer_size, &std::cout);
+		cryptf(paths[0], paths[1], worker, buffer.get(), buffer_size, &std::cout);
 	}
 
 	// display elapsed time if timing flag set
 	if (time)
 	{
-		long long t = duration_cast<std::chrono::milliseconds>(hrc::now() - start).count();
+		auto t = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - start).count();
 		std::cout << "elapsed time: " << t << "ms\n";
 	}
-
-	// free resources
-	delete[] worker.masks;
-	delete[] buffer;
 
 	// no errors
 	return 0;

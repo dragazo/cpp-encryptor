@@ -3,63 +3,81 @@
 
 #include <iostream>
 #include <thread>
+#include <memory>
 #include <atomic>
-
-// takes a string and converts it into an array of sets of bitmask phase shifts.
-// must use delete[] on the result to dispose
-// key   - the string to use as the key
-// maskc - the number of sets of bitmasks in the result
-int* getmasks(const char *key, int &maskc);
-
-// ------------------------------------------
-
-// typedef for function pointer to encryptor or decryptor
-// data       - the data array to encrypt
-// masks      - the array of bitmask sets to use
-// maskc      - the number of sets in the masks array
-// offset     - the starting position in data array
-// length     - the number of bytes to process
-// maskoffset - the starting index of the mask set to use
-typedef void(*crypto_t)(char *data, const int *masks, int maskc, int offset, int length, int maskoffset);
-
-// encrypts the specified binary array with an array of mask sets (as from getmasks)
-void encrypt(char *data, const int *masks, int maskc, int offset, int length, int maskoffset);
-// encrypts the specified binary array with an array of mask sets (as from getmasks)
-void decrypt(char *data, const int *masks, int maskc, int offset, int length, int maskoffset);
-
-// ------------------------------------------
+#include <mutex>
+#include <condition_variable>
 
 // wraps crypto functions to process in parallel
 class ParallelCrypto
 {
-private: // private data (self-managed)
+private: // -- helper types -- //
 
-	bool               active;   // flags that this object is still in use
-	int                threadc;  // number of threads
-	std::thread       *threads;  // threads to use
-	std::atomic<bool> *has_data; // settings for each thread
+	// represents a raw (and single-threaded) encryption/decryption function to call in parallel
+	typedef void(*crypto_t)(char *data, const int *masks, int maskc, int offset, int length, int maskoffset);
 
-	char *data;  // data array (not allocated)
-	int   width; // width of a data slice
+	// represents an encryption/decryption worker thread
+	struct worker_thread_t
+	{
+		std::atomic<bool> has_data = false; // marks if this worker has work to do
 
-public: // public data (user-managed)
+		std::thread thread; // thread handle for the worker
+	};
 
-	crypto_t crypto;  // the encryption function to use
-	int     *masks;   // mask sets
-	int      maskc;   // number of mask sets
-	int      maskoff; // mask set offset
+private: // -- private data (self-managed) -- //
+
+	bool active;  // flags that this object is still in use
+	
+	std::size_t workerc; // number of workers
+	std::unique_ptr<worker_thread_t[]> workers; // worker thread handle array
+
+	
+
+	char *data;  // data array (not allocated by us)
+	std::size_t width; // width of a data slice
+
+	crypto_t               crypto;  // the encryption function to use
+	std::unique_ptr<int[]> masks;   // mask sets - flattened maskc x 8 array
+	std::size_t            maskc;   // number of mask sets
+	std::size_t            maskoff; // mask set offset
+
+public: // -- enums -- //
+
+	enum class mode
+	{
+		encrypt, decrypt
+	};
 
 public:
 
-	// initializes the parallel crypto for work.
-	// this creates running thread objects, so try to do this as late as possible.
-	ParallelCrypto();
-	// stops threads and frees resources. destroying multiple times is safe.
-	// this can be used immediately after work is completed to avoid worker threads in the background.
-	// object is still usable after destruction (it just won't be parallel anymore)
+	// initializes the parallel crypto for work with the given password and mode.
+	// this is equivalent to calling setkey() and setmode() - throws any exception those would throw.
+	ParallelCrypto(const char *key, mode m);
+
 	~ParallelCrypto();
 
-	// processes the given data array in parallel
+	ParallelCrypto(const ParallelCrypto&) = delete;
+	ParallelCrypto(ParallelCrypto&&) = delete;
+
+	ParallelCrypto &operator=(const ParallelCrypto&) = delete;
+	ParallelCrypto &operator=(ParallelCrypto&&) = delete;
+
+	// sets the encrypt/decrypt mode.
+	// this must be called before any calls to process() are made - can be modified later.
+	// if m is an unknown mode, throws std::invalid_argument.
+	void setmode(mode m);
+
+	// sets the encryption/decryption key to use for all subsequient process requests.
+	// this must be called before any calls to process() are made - can be modified later.
+	// throws std::invalid_argument if key is null or empty
+	void setkey(const char *key);
+
+	// calls to process() remember the state after the last invocation to facilitate chunk processing.
+	// this function resets that state information.
+	// this should be used before processing a piece of unrelated information (e.g. a different file).
+	void reset() noexcept;
+
+	// processes the given data array in-place
 	// data  - data buffer to process
 	// start - index in array to begin
 	// count - number of bytes to process

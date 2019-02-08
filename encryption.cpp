@@ -7,12 +7,11 @@
 #include <algorithm>
 #include <filesystem>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
+
 #include "encryption.h"
 #include "filesize.h"
-
-// -- REMOVE THIS WHEN COMPILER IS UPDATED -- //
-namespace std { namespace filesystem = std::experimental::filesystem; }
-// ------------------------------------------ //
 
 namespace fs = std::filesystem;
 
@@ -28,7 +27,7 @@ constexpr int F[]{1, 1, 2, 6, 24, 120, 720, 5040};
 void getmasks(int key, int *dest)
 {
 	// create a list of powers of 2 (represents the bit mask phase shifts for each bit in a byte)
-	std::vector<int> pos = {1, 2, 4, 8, 16, 32, 64, 128};
+	std::vector<int> pos = { 1, 2, 4, 8, 16, 32, 64, 128 };
 	key %= 40320; // there are only 8! possibilities, so ensure key is in that range
 
 	// get all 8 bitmasks
@@ -40,15 +39,16 @@ void getmasks(int key, int *dest)
 		key %= F[7 - i];              // reduce key to put it in range for the next pass
 	}
 }
-int* getmasks(const char *key, int &maskc)
-{
-	maskc = strlen(key);            // get the string length
-	if (maskc == 0) return nullptr; // return null on empty
 
-	int *m = new int[maskc * 8]; // allocate the result
+std::unique_ptr<int[]> getmasks(const char *key, std::size_t &maskc)
+{
+	maskc = key ? std::strlen(key) : 0;  // get the string length
+	if (maskc == 0) return nullptr; // return null if key is null or empty
+
+	auto m = std::make_unique<int[]>(maskc * 8); // allocate the result
 
 	// for each set of 8 masks
-	for (int i = 0; i < maskc; ++i)
+	for (std::size_t i = 0; i < maskc; ++i)
 	{
 		// get the raw key and next raw key
 		int _key = key[i];
@@ -61,7 +61,7 @@ int* getmasks(const char *key, int &maskc)
 		_key *= (key[i] ^ _key ^ _next) * 21143; // the literal is drawn from a large prime number to help evenly distribute resultant keys
 
 		// get the masks for the interlaced key
-		getmasks(_key, m + i * 8);
+		getmasks(_key, &m[i * 8]);
 	}
 
 	return m;
@@ -144,37 +144,37 @@ void decrypt(char *data, const int *masks, int maskc, int offset, int length, in
 
 // -------------------------------
 
-ParallelCrypto::ParallelCrypto()
+ParallelCrypto::ParallelCrypto(const char *key, mode m)
 {
+	// set the password and mode right away cause they can potentially throw (internally calls reset())
+	setkey(key);
+	setmode(m);
+
 	// flag as active state
 	active = true;
 
 	// get the number of threads to create (#processors that aren't us) (make sure it's not negative for some reason)
-	threadc = std::max(std::thread::hardware_concurrency() - 1, 0u);
+	workerc = std::max(std::thread::hardware_concurrency() - 1, 0u);
 
 	// allocate the threads and settings
-	threads = threadc > 0 ? new std::thread[threadc] : nullptr;
-	has_data = threadc > 0 ? new std::atomic<bool>[threadc] : nullptr;
+	if (workerc > 0) workers = std::make_unique<worker_thread_t[]>(workerc);
 
 	// initialize the threads and settings
-	for (int i = 0; i < threadc; ++i)
+	for (std::size_t i = 0; i < workerc; ++i)
 	{
-		// initialize the settings object
-		has_data[i] = false;
-
 		// initialize the thread object
-		threads[i] = (std::thread)([this, i]()
+		workers[i].thread = std::thread([this, i]()
 		{
 			// if we're still running
 			while (active)
 			{
 				// if we have stuff to do
-				if (has_data[i])
+				if (workers[i].has_data.load(std::memory_order_acquire))
 				{
 					// process the data
-					crypto(data, masks, maskc, width * i, width, (maskoff + width * i) % maskc);
+					crypto(data, masks.get(), maskc, width * i, width, (maskoff + width * i) % maskc);
 					// mark that we did it
-					has_data[i] = false;
+					workers[i].has_data.store(false, std::memory_order_release);
 				}
 
 				// might as well end our time slice (otherwise would just be a spin wait)
@@ -182,33 +182,40 @@ ParallelCrypto::ParallelCrypto()
 			}
 		});
 	}
-
-	// null user-provided settings (safety)
-	crypto = nullptr;
-	masks = nullptr;
-	maskc = 0;
-	maskoff = 0;
 }
 ParallelCrypto::~ParallelCrypto()
 {
-	// request thread stop
+	// request thread stop and join workers
 	active = false;
-
-	// join workers
-	for (int i = 0; i < threadc; ++i) threads[i].join();
-	
-	// free private resources
-	delete[] threads;
-	delete[] has_data;
-
-	// null them to ensure destroying multiple times is safe
-	threads = nullptr;
-	has_data = nullptr;
-
-	// zero thread count
-	threadc = 0;
+	for (std::size_t i = 0; i < workerc; ++i) workers[i].thread.join();
 }
 
+void ParallelCrypto::setmode(mode m)
+{
+	switch (m)
+	{
+	case mode::encrypt: crypto = encrypt; break;
+	case mode::decrypt: crypto = decrypt; break;
+
+	default: throw std::invalid_argument("unknown crypto mode specified");
+	}
+
+	// different mode implies we're beginning unrelated data - reset
+	reset();
+}
+void ParallelCrypto::setkey(const char *key)
+{
+	masks = getmasks(key, maskc);
+	if (!masks) throw std::invalid_argument("password string was empty");
+
+	// different key implies we're beginning unrelated data - reset
+	reset();
+}
+
+void ParallelCrypto::reset() noexcept
+{
+	maskoff = 0;
+}
 void ParallelCrypto::process(char *buffer, int start, int count)
 {
 	// account for start index
@@ -216,20 +223,21 @@ void ParallelCrypto::process(char *buffer, int start, int count)
 
 	// store data data
 	data = buffer;
-	width = count / (threadc + 1); // threadc + 1 because we'll be doing a slice
+	width = count / (workerc + 1); // threadc + 1 because we'll be doing a slice
 
 	// if width is positive, distribute work load to the threads
-	if (width > 0) for (int i = 0; i < threadc; ++i) has_data[i] = true;
+	if (width > 0) for (std::size_t i = 0; i < workerc; ++i) workers[i].has_data.store(true, std::memory_order_release);
 
 	// we do the last slice ourselves
-	crypto(data, masks, maskc, width * threadc, count - width * threadc, (maskoff + width * threadc) % maskc);
+	crypto(data, masks.get(), maskc, width * workerc, count - width * workerc, (maskoff + width * workerc) % maskc);
 
-	// wait for the threads to finish
-	for (int i = 0; i < threadc; ++i) while (has_data[i]) std::this_thread::yield();
+	// wait for the workers to finish their stuff
+	for (std::size_t i = 0; i < workerc; ++i) while (workers[i].has_data.load(std::memory_order_acquire)) std::this_thread::yield();
 
 	// bump up offset
 	maskoff = (maskoff + count) % maskc;
 }
+
 
 // -------------------------------
 
@@ -254,7 +262,7 @@ void crypt(std::istream &in, std::ostream &out, ParallelCrypto &worker, char *bu
 	// -- and the fun begins -- //
 
 	// reset mask offset
-	worker.maskoff = 0;
+	worker.reset();
 
 	while (true)
 	{
