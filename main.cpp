@@ -47,7 +47,7 @@ void diag(const char *key)
 int main(int argc, const char **argv)
 {
 	#define __help { print_help(std::cout); return 0; }
-	#define __crypto(c) { if (has_mode) { std::cerr << "cannot respecify mode\n"; return 0; } has_mode = true; mode = ParallelCrypto::mode::c; }
+	#define __crypto(c) { if (has_mode) { std::cerr << "cannot respecify mode\n"; return 0; } has_mode = true; mode = crypto_service::mode::c; }
 	#define __password { if (password) { std::cerr << "cannot respecify password\n"; return 0; } if (i + 1 >= argc) { std::cerr << "option " << argv[i] << " expected a password to follow\n"; return 0; } password = argv[++i]; }
 	#define __recursive { recursive = true; }
 	#define __time { time = true; }
@@ -58,7 +58,7 @@ int main(int argc, const char **argv)
 	bool                           time = false;       // flags that we're batch processing the files
 	const char                    *password = nullptr; // password to use
 	bool                           has_mode = false;   // marks if mode is valid
-	ParallelCrypto::mode           mode = ParallelCrypto::mode::encrypt; // crypto mode to use
+	crypto_service::mode           mode = crypto_service::mode::encrypt; // crypto mode to use
 	std::vector<const char*>       paths;              // the provided paths
 	
 	// for each argument
@@ -99,7 +99,7 @@ int main(int argc, const char **argv)
 	if (!password) { std::cerr << "expected -p. see -h for help\n"; return 0; };
 
 	// generate the worker with the proper password and mode
-	ParallelCrypto worker(password, mode);
+	crypto_service crypto(password, mode);
 
 	// create a buffer
 	std::unique_ptr<char[]> buffer = std::make_unique<char[]>(buffer_size);
@@ -111,7 +111,7 @@ int main(int argc, const char **argv)
 	if (recursive)
 	{
 		// process each pathspec recursively
-		for (std::size_t i = 0; i < paths.size(); ++i) cryptf_recursive(paths[i], worker, buffer.get(), buffer_size, &std::cout);
+		for (std::size_t i = 0; i < paths.size(); ++i) crypto.process_file_in_place_recursive(paths[i], buffer.get(), buffer_size, &std::cout);
 	}
 	// otherwise doing from-to copy
 	else
@@ -120,7 +120,7 @@ int main(int argc, const char **argv)
 		if (paths.size() != 2) { std::cerr << "non-recursive mode requires exactly 2 paths (input and output). see -h for help\n"; return 0; }
 
 		// process the file
-		cryptf(paths[0], paths[1], worker, buffer.get(), buffer_size, &std::cout);
+		crypto.process_file(paths[0], paths[1], buffer.get(), buffer_size, &std::cout);
 	}
 
 	// display elapsed time if timing flag set

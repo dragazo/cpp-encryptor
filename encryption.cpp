@@ -23,7 +23,7 @@ constexpr int F[]{1, 1, 2, 6, 24, 120, 720, 5040};
 
 // -------------------------------
 
-// gets the masks for an individual key
+// gets the masks for an individual key (sub array of 8)
 void getmasks(int key, int *dest)
 {
 	// create a list of powers of 2 (represents the bit mask phase shifts for each bit in a byte)
@@ -40,12 +40,14 @@ void getmasks(int key, int *dest)
 	}
 }
 
-std::unique_ptr<int[]> getmasks(const char *key, std::size_t &maskc)
+crypto_service::mask_set::mask_set(const char *key)
 {
-	maskc = key ? std::strlen(key) : 0;  // get the string length
-	if (maskc == 0) return nullptr; // return null if key is null or empty
+	// compute the mask count - null or empty string is illegal - throw
+	std::size_t maskc = key ? std::strlen(key) : 0;  // get the string length
+	if (maskc == 0) throw std::invalid_argument("key string was null or empty");
 
-	auto m = std::make_unique<int[]>(maskc * 8); // allocate the result
+	// resize the vector to the proper size
+	masks.resize(maskc * 8);
 
 	// for each set of 8 masks
 	for (std::size_t i = 0; i < maskc; ++i)
@@ -61,10 +63,8 @@ std::unique_ptr<int[]> getmasks(const char *key, std::size_t &maskc)
 		_key *= (key[i] ^ _key ^ _next) * 21143; // the literal is drawn from a large prime number to help evenly distribute resultant keys
 
 		// get the masks for the interlaced key
-		getmasks(_key, &m[i * 8]);
+		getmasks(_key, masks.data() + (i * 8));
 	}
-
-	return m;
 }
 
 // -------------------------------
@@ -144,10 +144,9 @@ void decrypt(char *data, const int *masks, int maskc, int offset, int length, in
 
 // -------------------------------
 
-ParallelCrypto::ParallelCrypto(const char *key, mode m)
+crypto_service::crypto_service(const char *key, mode m) : masks(key)
 {
-	// set the password and mode right away cause they can potentially throw (internally calls reset())
-	setkey(key);
+	// masks was already set - set mode now cause it might also throw
 	setmode(m);
 
 	// get the number of workers to create - 1 per processor with a minimum of 1 if that's zero for some reason (better safe than sorry)
@@ -157,13 +156,11 @@ ParallelCrypto::ParallelCrypto(const char *key, mode m)
 	workers = std::make_unique<worker_thread_t[]>(workerc);
 
 	{
-		std::unique_lock<std::mutex> sync_lock(worker_sync_mutex);
+		std::unique_lock<std::mutex> sync_lock(sync_mutex);
 
-		// mark workers as being alive but we're not ready for them to do anything just yet - done under lock to prevent reordering problems for shared memory
-		alive = true;
-
-		// make sure to reset the done count - done by us because it's our spurious failure condition
-		workers_done = 0;
+		workers_alive = true;  // mark workers as being alive but we're not ready for them to do anything just yet - done under lock to prevent reordering problems for shared memory
+		workers_dirty = false; // mark that they're not dirty - they'll immediately get up-to-date copies upon starting
+		workers_done = 0;      // make sure to reset the done count - done by us because it's our spurious failure condition
 
 		// start the worker threads - done under lock to ensure all workers are waiting before we continue
 		for (std::size_t i = 0; i < workerc; ++i)
@@ -173,7 +170,7 @@ ParallelCrypto::ParallelCrypto(const char *key, mode m)
 			workers[i].thread = std::thread([this, i]()
 			{
 				// create the unique lock now so we don't have to inside the loop
-				std::unique_lock<std::mutex> sync_lock(worker_sync_mutex, std::defer_lock);
+				std::unique_lock<std::mutex> sync_lock(sync_mutex, std::defer_lock);
 
 				while (true)
 				{
@@ -183,31 +180,31 @@ ParallelCrypto::ParallelCrypto(const char *key, mode m)
 					worker_cv.wait(sync_lock, [this, i] { return workers[i].ready; });
 					sync_lock.unlock();
 
-					// clear the ready flag so we won't spuriously wake up on the next wait and try to do something
-					workers[i].ready = false;
-
 					// at this point we've been woken up and the ready flag is set - we're ready to do something.
 					// first and foremost, if alive is false the requested action is to terminate.
-					if (!alive) return;
+					if (!workers_alive) return;
+
+					// clear the ready flag so we won't spuriously wake up on the next wait and try to do something
+					workers[i].ready = false;
 
 					// -- otherwise process our data -- //
 
 					// otherwise process our piece of the data array
-					crypto(data, masks.get(), maskc, width * i,
+					crypto_func(data, masks.get(), masks.count(), width * i,
 						i == workerc - 1 ? length - width * i : width, // last index worker does whatever's left over of the array
-						(maskoff + width * i) % maskc);
+						(maskoff + width * i) % masks.count());
 				}
 			});
 		}
 		main_cv.wait(sync_lock, [this] {return workers_done == workerc; });
 	}
 }
-ParallelCrypto::~ParallelCrypto()
+crypto_service::~crypto_service()
 {
 	// request worker thread - done under lock to prevent case of alive/ready write operations being reordered
 	// i.e. without the mutex nothing stops the alive write from being invisible to the worker threads
-	std::unique_lock<std::mutex> sync_lock(worker_sync_mutex);
-	alive = false;
+	std::unique_lock<std::mutex> sync_lock(sync_mutex);
+	workers_alive = false;
 	for (std::size_t i = 0; i < workerc; ++i) workers[i].ready = true; // mark all as ready
 	worker_cv.notify_all();
 	sync_lock.unlock();
@@ -216,33 +213,32 @@ ParallelCrypto::~ParallelCrypto()
 	for (std::size_t i = 0; i < workerc; ++i) workers[i].thread.join();
 }
 
-void ParallelCrypto::setmode(mode m)
+void crypto_service::setmode(mode m)
 {
+	// update crypto func
 	switch (m)
 	{
-	case mode::encrypt: crypto = encrypt; break;
-	case mode::decrypt: crypto = decrypt; break;
+	case mode::encrypt: crypto_func = encrypt; break;
+	case mode::decrypt: crypto_func = decrypt; break;
 
 	default: throw std::invalid_argument("unknown crypto mode specified");
 	}
 
-	// different mode implies we're beginning unrelated data - reset
-	reset();
+	reset(); // different key implies we're beginning unrelated data - reset
 }
-void ParallelCrypto::setkey(const char *key)
+void crypto_service::setkey(const char *key)
 {
-	masks = getmasks(key, maskc);
-	if (!masks) throw std::invalid_argument("password string was empty");
+	// update masks
+	masks = mask_set(key);
 
-	// different key implies we're beginning unrelated data - reset
-	reset();
+	reset(); // different key implies we're beginning unrelated data - reset
 }
 
-void ParallelCrypto::reset() noexcept
+void crypto_service::reset() noexcept
 {
 	maskoff = 0;
 }
-void ParallelCrypto::process(char *buffer, int start, int count)
+void crypto_service::process(char *buffer, int start, int count)
 {
 	// update the shared variables
 	data = buffer + start;
@@ -254,19 +250,19 @@ void ParallelCrypto::process(char *buffer, int start, int count)
 
 	{
 		// wake up workers and wait for them to all be done
-		std::unique_lock<std::mutex> sync_lock(worker_sync_mutex);
+		std::unique_lock<std::mutex> sync_lock(sync_mutex);
 		for (std::size_t i = 0; i < workerc; ++i) workers[i].ready = true; // mark all as ready
 		worker_cv.notify_all();
 		main_cv.wait(sync_lock, [this] { return workers_done == workerc; });
 	}
 
 	// bump up offset
-	maskoff = (maskoff + count) % maskc;
+	maskoff = (maskoff + count) % masks.count();
 }
 
 // -------------------------------
 
-void crypt(std::istream &in, std::ostream &out, ParallelCrypto &worker, char *buffer, int buflen, std::ostream *log)
+void crypto_service::process_stream(std::istream &in, std::ostream &out, char *buffer, int buflen, std::ostream *log)
 {
 	// -- load stats -- //
 
@@ -287,7 +283,7 @@ void crypt(std::istream &in, std::ostream &out, ParallelCrypto &worker, char *bu
 	// -- and the fun begins -- //
 
 	// reset mask offset
-	worker.reset();
+	reset();
 
 	while (true)
 	{
@@ -302,7 +298,7 @@ void crypt(std::istream &in, std::ostream &out, ParallelCrypto &worker, char *bu
 		if (len == 0) break;
 
 		// process the data
-		worker.process(buffer, 0, (int)len);
+		process(buffer, 0, (int)len);
 
 		// clear out's state (reading to eof sets eof flag, which means we can't write the data back if in/out are the same file)
 		out.clear();
@@ -387,7 +383,7 @@ bool openf(const char *path, std::fstream &f, std::ostream *log = nullptr)
 	return true;
 }
 
-bool cryptf(const char *in_path, const char *out_path, ParallelCrypto &worker, char *buffer, int buflen, std::ostream *log)
+bool crypto_service::process_file(const char *in_path, const char *out_path, char *buffer, int buflen, std::ostream *log)
 {
 	// open the files
 	std::ifstream in;
@@ -395,29 +391,28 @@ bool cryptf(const char *in_path, const char *out_path, ParallelCrypto &worker, c
 	if (!openf(in_path, out_path, in, out, log)) return false;
 
 	// hand off to stream function
-	crypt(in, out, worker, buffer, buflen, log);
+	process_stream(in, out, buffer, buflen, log);
 	return true;
 }
-bool cryptf(const char *path, ParallelCrypto &worker, char *buffer, int buflen, std::ostream *log)
+bool crypto_service::process_file_in_place(const char *path, char *buffer, int buflen, std::ostream *log)
 {
 	// open the file
 	std::fstream f;
 	if (!openf(path, f, log)) return false;
 
 	// hand off to stream function
-	crypt(f, f, worker, buffer, buflen, log);
+	process_stream(f, f, buffer, buflen, log);
 	return true;
 }
 
-int cryptf_recursive(const char *root_path, ParallelCrypto &worker, char *buffer, int buflen, std::ostream *log)
+int crypto_service::process_file_in_place_recursive(const char *root_path, char *buffer, int buflen, std::ostream *log)
 {
 	int successes = 0; // number of successful operations
 
 	// if it's a file, process it
 	if (fs::is_regular_file(root_path))
 	{
-		
-		if (cryptf(root_path, worker, buffer, buflen, log)) ++successes;
+		if (process_file_in_place(root_path, buffer, buflen, log)) ++successes;
 	}
 	// if it's a directory, process contents recursively
 	else if (fs::is_directory(root_path))
@@ -425,11 +420,10 @@ int cryptf_recursive(const char *root_path, ParallelCrypto &worker, char *buffer
 		// for each item recursively
 		for (const fs::directory_entry &entry : fs::recursive_directory_iterator(root_path))
 		{
-			// if this is a file 
+			// if this is a file - hand off to cryptf
 			if (fs::is_regular_file(entry.status()))
 			{
-				// hand off to cryptf
-				if (cryptf(entry.path().generic_string().c_str(), worker, buffer, buflen, log)) ++successes;
+				if (process_file_in_place(entry.path().generic_string().c_str(), buffer, buflen, log)) ++successes;
 			}
 		}
 	}
