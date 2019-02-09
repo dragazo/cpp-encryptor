@@ -25,6 +25,7 @@ void print_help(std::ostream &ostr)
 	ostr << '\n';
 }
 
+/*
 #ifdef _DEBUG
 // runs diagnostics on the supplied string key
 void diag(const char *key)
@@ -41,6 +42,7 @@ void diag(const char *key)
 	std::cout << '\n';
 }
 #endif
+*/
 
 int main(int argc, const char **argv)
 {
@@ -98,7 +100,7 @@ int main(int argc, const char **argv)
 
 	// generate the worker with the proper password and mode
 	ParallelCrypto worker(password, mode);
-	
+
 	// create a buffer
 	std::unique_ptr<char[]> buffer = std::make_unique<char[]>(buffer_size);
 

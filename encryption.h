@@ -19,22 +19,27 @@ private: // -- helper types -- //
 	// represents an encryption/decryption worker thread
 	struct worker_thread_t
 	{
-		std::atomic<bool> has_data = false; // marks if this worker has work to do
-
+		bool ready; // marks if this worker is ready to do something
 		std::thread thread; // thread handle for the worker
 	};
 
-private: // -- private data (self-managed) -- //
+private: // -- management data -- //
 
-	bool active;  // flags that this object is still in use
-	
+	std::mutex worker_sync_mutex;      // mutex used for worker thread synchronization
+	std::condition_variable main_cv;   // condition that the main thread waits on (manages the others)
+	std::condition_variable worker_cv; // condition that the worker threads wait on
+
+	bool alive; // marks that the workers should still be alive
+	std::size_t workers_done; // number of workers that have completed their operation (managed by workers)
+
 	std::size_t workerc; // number of workers
 	std::unique_ptr<worker_thread_t[]> workers; // worker thread handle array
 
-	
+private: // -- data -- //
 
-	char *data;  // data array (not allocated by us)
-	std::size_t width; // width of a data slice
+	char       *data;   // data array (not allocated by us)
+	std::size_t length; // total length of the data array to process
+	std::size_t width;  // width of a data slice
 
 	crypto_t               crypto;  // the encryption function to use
 	std::unique_ptr<int[]> masks;   // mask sets - flattened maskc x 8 array

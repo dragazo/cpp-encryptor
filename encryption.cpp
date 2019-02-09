@@ -150,43 +150,69 @@ ParallelCrypto::ParallelCrypto(const char *key, mode m)
 	setkey(key);
 	setmode(m);
 
-	// flag as active state
-	active = true;
-
-	// get the number of threads to create (#processors that aren't us) (make sure it's not negative for some reason)
-	workerc = std::max(std::thread::hardware_concurrency() - 1, 0u);
+	// get the number of workers to create - 1 per processor with a minimum of 1 if that's zero for some reason (better safe than sorry)
+	workerc = std::max(std::thread::hardware_concurrency(), 1u);
 
 	// allocate the threads and settings
-	if (workerc > 0) workers = std::make_unique<worker_thread_t[]>(workerc);
+	workers = std::make_unique<worker_thread_t[]>(workerc);
 
-	// initialize the threads and settings
-	for (std::size_t i = 0; i < workerc; ++i)
 	{
-		// initialize the thread object
-		workers[i].thread = std::thread([this, i]()
-		{
-			// if we're still running
-			while (active)
-			{
-				// if we have stuff to do
-				if (workers[i].has_data.load(std::memory_order_acquire))
-				{
-					// process the data
-					crypto(data, masks.get(), maskc, width * i, width, (maskoff + width * i) % maskc);
-					// mark that we did it
-					workers[i].has_data.store(false, std::memory_order_release);
-				}
+		std::unique_lock<std::mutex> sync_lock(worker_sync_mutex);
 
-				// might as well end our time slice (otherwise would just be a spin wait)
-				std::this_thread::yield();
-			}
-		});
+		// mark workers as being alive but we're not ready for them to do anything just yet - done under lock to prevent reordering problems for shared memory
+		alive = true;
+
+		// make sure to reset the done count - done by us because it's our spurious failure condition
+		workers_done = 0;
+
+		// start the worker threads - done under lock to ensure all workers are waiting before we continue
+		for (std::size_t i = 0; i < workerc; ++i)
+		{
+			workers[i].ready = false; // mark as not ready (nothing to do yet)
+
+			workers[i].thread = std::thread([this, i]()
+			{
+				// create the unique lock now so we don't have to inside the loop
+				std::unique_lock<std::mutex> sync_lock(worker_sync_mutex, std::defer_lock);
+
+				while (true)
+				{
+					// take the sync mutex and wait on the worker cv before we begin
+					sync_lock.lock();
+					if (++workers_done == workerc) main_cv.notify_one(); // if we're the last to wait, notify main before we wait for work
+					worker_cv.wait(sync_lock, [this, i] { return workers[i].ready; });
+					sync_lock.unlock();
+
+					// clear the ready flag so we won't spuriously wake up on the next wait and try to do something
+					workers[i].ready = false;
+
+					// at this point we've been woken up and the ready flag is set - we're ready to do something.
+					// first and foremost, if alive is false the requested action is to terminate.
+					if (!alive) return;
+
+					// -- otherwise process our data -- //
+
+					// otherwise process our piece of the data array
+					crypto(data, masks.get(), maskc, width * i,
+						i == workerc - 1 ? length - width * i : width, // last index worker does whatever's left over of the array
+						(maskoff + width * i) % maskc);
+				}
+			});
+		}
+		main_cv.wait(sync_lock, [this] {return workers_done == workerc; });
 	}
 }
 ParallelCrypto::~ParallelCrypto()
 {
-	// request thread stop and join workers
-	active = false;
+	// request worker thread - done under lock to prevent case of alive/ready write operations being reordered
+	// i.e. without the mutex nothing stops the alive write from being invisible to the worker threads
+	std::unique_lock<std::mutex> sync_lock(worker_sync_mutex);
+	alive = false;
+	for (std::size_t i = 0; i < workerc; ++i) workers[i].ready = true; // mark all as ready
+	worker_cv.notify_all();
+	sync_lock.unlock();
+	
+	// join the workers
 	for (std::size_t i = 0; i < workerc; ++i) workers[i].thread.join();
 }
 
@@ -218,26 +244,25 @@ void ParallelCrypto::reset() noexcept
 }
 void ParallelCrypto::process(char *buffer, int start, int count)
 {
-	// account for start index
-	buffer += start;
+	// update the shared variables
+	data = buffer + start;
+	length = count;
+	width = count / workerc;
+	
+	// make sure to reset the workers done count for them before they wake up - done by us because it's our spurious wakeup condition
+	workers_done = 0;
 
-	// store data data
-	data = buffer;
-	width = count / (workerc + 1); // threadc + 1 because we'll be doing a slice
-
-	// if width is positive, distribute work load to the threads
-	if (width > 0) for (std::size_t i = 0; i < workerc; ++i) workers[i].has_data.store(true, std::memory_order_release);
-
-	// we do the last slice ourselves
-	crypto(data, masks.get(), maskc, width * workerc, count - width * workerc, (maskoff + width * workerc) % maskc);
-
-	// wait for the workers to finish their stuff
-	for (std::size_t i = 0; i < workerc; ++i) while (workers[i].has_data.load(std::memory_order_acquire)) std::this_thread::yield();
+	{
+		// wake up workers and wait for them to all be done
+		std::unique_lock<std::mutex> sync_lock(worker_sync_mutex);
+		for (std::size_t i = 0; i < workerc; ++i) workers[i].ready = true; // mark all as ready
+		worker_cv.notify_all();
+		main_cv.wait(sync_lock, [this] { return workers_done == workerc; });
+	}
 
 	// bump up offset
 	maskoff = (maskoff + count) % maskc;
 }
-
 
 // -------------------------------
 
