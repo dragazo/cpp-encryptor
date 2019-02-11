@@ -15,8 +15,11 @@ class crypto_service
 {
 private: // -- helper types -- //
 
+	// type to use for an individual mask value
+	typedef int mask_t;
+
 	// represents a raw (and single-threaded) encryption/decryption function to call in parallel
-	typedef void(*crypto_func_t)(char *data, const int *masks, int maskc, int offset, int length, int maskoffset);
+	typedef void(*crypto_func_t)(char *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset);
 
 	// represents an encryption/decryption worker thread
 	struct worker_thread_t
@@ -29,7 +32,12 @@ private: // -- helper types -- //
 	{
 	private: // -- data -- //
 
-		std::vector<int> masks;
+		std::vector<mask_t> masks;
+
+	private: // -- helpers -- //
+
+		// gets the masks for an individual key (sub array of 8)
+		static void getmasks(int key, mask_t *dest);
 
 	public: // -- ctor / dtor / asgn -- //
 
@@ -41,7 +49,7 @@ private: // -- helper types -- //
 		std::size_t count() const noexcept { return masks.size() / 8; }
 
 		// returns a pointer to the flattened array of masks - think of it as a count() x 8 flattened array of phase shifts
-		int *get() noexcept { return masks.data(); }
+		mask_t *get() noexcept { return masks.data(); }
 	};
 
 private: // -- management data -- //
@@ -68,6 +76,11 @@ private: // -- data -- //
 	crypto_func_t crypto_func; // the encryption/decryption function to use
 	mask_set      masks;       // mask sets - flattened maskc x 8 array
 	std::size_t   maskoff;      // mask set offset
+
+private: // -- helpers -- //
+
+	static void encrypt(char *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset);
+	static void decrypt(char *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset);
 
 public: // -- enums -- //
 
@@ -113,7 +126,7 @@ public: // -- raw crypto processing -- //
 	// data  - data buffer to process
 	// start - index in array to begin
 	// count - number of bytes to process
-	void process(char *data, int start, int count);
+	void process(char *data, std::size_t start, std::size_t count);
 
 public: // -- steam/file crypto processing -- //
 
@@ -123,15 +136,15 @@ public: // -- steam/file crypto processing -- //
 	// buffer - the buffer to use for io/processing operations
 	// buflen - the length of the buffer
 	// log    - the destination for log messages (or null for no logging)
-	void process_stream(std::istream &in, std::ostream &out, char *buffer, int buflen, std::ostream *log = nullptr);
+	void process_stream(std::istream &in, std::ostream &out, char *buffer, std::size_t buflen, std::ostream *log = nullptr);
 
 	// encrypts or decrypts the input file to the output file. returns true if there were no errors
-	bool process_file(const char *in_path, const char *out_path, char *buffer, int buflen, std::ostream *log = nullptr);
+	bool process_file(const char *in_path, const char *out_path, char *buffer, std::size_t buflen, std::ostream *log = nullptr);
 	// encrypts or decrypts the specified file in-place. returns true if there were no errors
-	bool process_file_in_place(const char *path, char *buffer, int buflen, std::ostream *log = nullptr);
+	bool process_file_in_place(const char *path, char *buffer, std::size_t buflen, std::ostream *log = nullptr);
 
 	// recursively encrypts or decrypts the contents of the specified path in-place. returns the number of successful operations
-	int process_file_in_place_recursive(const char *root_path, char *buffer, int buflen, std::ostream *log = nullptr);
+	std::size_t process_file_in_place_recursive(const char *root_path, char *buffer, std::size_t buflen, std::ostream *log = nullptr);
 };
 
 #endif

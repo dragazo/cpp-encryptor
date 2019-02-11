@@ -18,13 +18,12 @@ namespace fs = std::filesystem;
 // rotates an 8-bit value v to the right by n bits
 #define rot_8(v, n) ((v >> n) | (v << n) & 0xff)
 
-// pre-loaded factorials
+// pre-loaded factorials - F[i] = i!
 constexpr int F[]{1, 1, 2, 6, 24, 120, 720, 5040};
 
 // -------------------------------
 
-// gets the masks for an individual key (sub array of 8)
-void getmasks(int key, int *dest)
+void crypto_service::mask_set::getmasks(int key, mask_t *dest)
 {
 	// create a list of powers of 2 (represents the bit mask phase shifts for each bit in a byte)
 	std::vector<int> pos = { 1, 2, 4, 8, 16, 32, 64, 128 };
@@ -69,21 +68,21 @@ crypto_service::mask_set::mask_set(const char *key)
 
 // -------------------------------
 
-void encrypt(char *data, const int *masks, int maskc, int offset, int length, int maskoffset)
+void crypto_service::encrypt(char *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset)
 {
 #define bitop(i) res |= ((set[i] & ch) != 0) << i
 
-	int        res;                          // the result of one iteration
-	const int *set = masks + maskoffset * 8; // the mask set to use
-	int        ch;                           // the character being processed
+	int           res;                          // the result of one iteration
+	const mask_t *set = masks + maskoffset * 8; // the mask set to use
+	int           ch;                           // the character being processed
 
 	data += offset; // increment data up to start
 
 	// for each byte up to len
-	for (int i = 0; i < length; ++i, ++data)
+	for (std::size_t i = 0; i < length; ++i)
 	{
-		res = 0;    // zero the result
-		ch = *data; // get the character being processed
+		res = 0;      // zero the result
+		ch = data[i]; // get the character being processed
 
 		// apply the phase shifts
 		// macro inlining (potentially faster, depending on optimizer)
@@ -97,7 +96,7 @@ void encrypt(char *data, const int *masks, int maskc, int offset, int length, in
 		bitop(7);
 
 		// record the result
-		*data = res;
+		data[i] = res;
 
 		// next pass
 		if ((set += 8) == masks + maskc * 8) set = masks;
@@ -105,21 +104,23 @@ void encrypt(char *data, const int *masks, int maskc, int offset, int length, in
 
 #undef bitop
 }
-void decrypt(char *data, const int *masks, int maskc, int offset, int length, int maskoffset)
+void crypto_service::decrypt(char *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset)
 {
 #define bitop(i) res |= -((ch >> i) & 1) & set[i]
 
-	int        res;                          // the result of one iteration
-	const int *set = masks + maskoffset * 8; // the mask set to use
-	int        ch;                           // the character being processed
+	int           res;                          // the result of one iteration
+	const mask_t *set = masks + maskoffset * 8; // the mask set to use
+	int           ch;                           // the character being processed
+
+	const mask_t *const mask_end = masks + maskc * 8; // the end iterator for the mask set - used inside loop for mask set wrapping
 
 	data += offset; // increment data up to start
 
 	// for each byte up to len
-	for (int i = 0; i < length; ++i, ++data)
+	for (std::size_t i = 0; i < length; ++i)
 	{
-		res = 0;    // zero the result
-		ch = *data; // get the character being processed
+		res = 0;      // zero the result
+		ch = data[i]; // get the character being processed
 
 		// apply the phase shifts
 		// macro inlining (potentially faster, depending on optimizer)
@@ -133,10 +134,10 @@ void decrypt(char *data, const int *masks, int maskc, int offset, int length, in
 		bitop(7);
 
 		// record the result
-		*data = res;
+		data[i] = res;
 
 		// next pass
-		if ((set += 8) == masks + maskc * 8) set = masks;
+		if ((set += 8) == mask_end) set = masks;
 	}
 
 #undef bitop
@@ -238,7 +239,7 @@ void crypto_service::reset() noexcept
 {
 	maskoff = 0;
 }
-void crypto_service::process(char *buffer, int start, int count)
+void crypto_service::process(char *buffer, std::size_t start, std::size_t count)
 {
 	// update the shared variables
 	data = buffer + start;
@@ -262,7 +263,7 @@ void crypto_service::process(char *buffer, int start, int count)
 
 // -------------------------------
 
-void crypto_service::process_stream(std::istream &in, std::ostream &out, char *buffer, int buflen, std::ostream *log)
+void crypto_service::process_stream(std::istream &in, std::ostream &out, char *buffer, std::size_t buflen, std::ostream *log)
 {
 	// -- load stats -- //
 
@@ -298,7 +299,7 @@ void crypto_service::process_stream(std::istream &in, std::ostream &out, char *b
 		if (len == 0) break;
 
 		// process the data
-		process(buffer, 0, (int)len);
+		process(buffer, 0, (std::size_t)len);
 
 		// clear out's state (reading to eof sets eof flag, which means we can't write the data back if in/out are the same file)
 		out.clear();
@@ -383,7 +384,7 @@ bool openf(const char *path, std::fstream &f, std::ostream *log = nullptr)
 	return true;
 }
 
-bool crypto_service::process_file(const char *in_path, const char *out_path, char *buffer, int buflen, std::ostream *log)
+bool crypto_service::process_file(const char *in_path, const char *out_path, char *buffer, std::size_t buflen, std::ostream *log)
 {
 	// open the files
 	std::ifstream in;
@@ -394,7 +395,7 @@ bool crypto_service::process_file(const char *in_path, const char *out_path, cha
 	process_stream(in, out, buffer, buflen, log);
 	return true;
 }
-bool crypto_service::process_file_in_place(const char *path, char *buffer, int buflen, std::ostream *log)
+bool crypto_service::process_file_in_place(const char *path, char *buffer, std::size_t buflen, std::ostream *log)
 {
 	// open the file
 	std::fstream f;
@@ -405,9 +406,9 @@ bool crypto_service::process_file_in_place(const char *path, char *buffer, int b
 	return true;
 }
 
-int crypto_service::process_file_in_place_recursive(const char *root_path, char *buffer, int buflen, std::ostream *log)
+std::size_t crypto_service::process_file_in_place_recursive(const char *root_path, char *buffer, std::size_t buflen, std::ostream *log)
 {
-	int successes = 0; // number of successful operations
+	std::size_t successes = 0; // number of successful operations
 
 	// if it's a file, process it
 	if (fs::is_regular_file(root_path))
