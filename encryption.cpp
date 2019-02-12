@@ -42,13 +42,13 @@ void crypto_service::mask_set::getmasks(int key, mask_t *dest)
 crypto_service::mask_set::mask_set(const char *key)
 {
 	// compute the mask count - null or empty string is illegal - throw
-	std::size_t maskc = key ? std::strlen(key) : 0;  // get the string length
+	std::size_t maskc = key ? std::strlen(key) : 0;  // get the string length - this will be the number of masks
 	if (maskc == 0) throw std::invalid_argument("key string was null or empty");
 
-	// resize the vector to the proper size
+	// resize the vector to the proper size - number of masks (rows) times 8 phase shifts (cols)
 	masks.resize(maskc * 8);
 
-	// for each set of 8 masks
+	// for each set row of phase shifts
 	for (std::size_t i = 0; i < maskc; ++i)
 	{
 		// get the raw key and next raw key
@@ -68,7 +68,7 @@ crypto_service::mask_set::mask_set(const char *key)
 
 // -------------------------------
 
-void crypto_service::encrypt(char *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset)
+void crypto_service::encrypt(void *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset)
 {
 #define bitop(i) res |= ((set[i] & ch) != 0) << i
 
@@ -76,13 +76,13 @@ void crypto_service::encrypt(char *data, const mask_t *masks, std::size_t maskc,
 	const mask_t *set = masks + maskoffset * 8; // the mask set to use
 	int           ch;                           // the character being processed
 
-	data += offset; // increment data up to start
+	data = reinterpret_cast<char*>(data) + offset; // increment data up to start
 
 	// for each byte up to len
 	for (std::size_t i = 0; i < length; ++i)
 	{
 		res = 0;      // zero the result
-		ch = data[i]; // get the character being processed
+		ch = reinterpret_cast<char*>(data)[i]; // get the character being processed
 
 		// apply the phase shifts
 		// macro inlining (potentially faster, depending on optimizer)
@@ -96,7 +96,7 @@ void crypto_service::encrypt(char *data, const mask_t *masks, std::size_t maskc,
 		bitop(7);
 
 		// record the result
-		data[i] = res;
+		reinterpret_cast<char*>(data)[i] = res;
 
 		// next pass
 		if ((set += 8) == masks + maskc * 8) set = masks;
@@ -104,7 +104,7 @@ void crypto_service::encrypt(char *data, const mask_t *masks, std::size_t maskc,
 
 #undef bitop
 }
-void crypto_service::decrypt(char *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset)
+void crypto_service::decrypt(void *data, const mask_t *masks, std::size_t maskc, std::size_t offset, std::size_t length, std::size_t maskoffset)
 {
 #define bitop(i) res |= -((ch >> i) & 1) & set[i]
 
@@ -114,13 +114,13 @@ void crypto_service::decrypt(char *data, const mask_t *masks, std::size_t maskc,
 
 	const mask_t *const mask_end = masks + maskc * 8; // the end iterator for the mask set - used inside loop for mask set wrapping
 
-	data += offset; // increment data up to start
+	data = reinterpret_cast<char*>(data) + offset; // increment data up to start
 
 	// for each byte up to len
 	for (std::size_t i = 0; i < length; ++i)
 	{
 		res = 0;      // zero the result
-		ch = data[i]; // get the character being processed
+		ch = reinterpret_cast<char*>(data)[i]; // get the character being processed
 
 		// apply the phase shifts
 		// macro inlining (potentially faster, depending on optimizer)
@@ -134,7 +134,7 @@ void crypto_service::decrypt(char *data, const mask_t *masks, std::size_t maskc,
 		bitop(7);
 
 		// record the result
-		data[i] = res;
+		reinterpret_cast<char*>(data)[i] = res;
 
 		// next pass
 		if ((set += 8) == mask_end) set = masks;
@@ -160,7 +160,6 @@ crypto_service::crypto_service(const char *key, mode m) : masks(key)
 		std::unique_lock<std::mutex> sync_lock(sync_mutex);
 
 		workers_alive = true;  // mark workers as being alive but we're not ready for them to do anything just yet - done under lock to prevent reordering problems for shared memory
-		workers_dirty = false; // mark that they're not dirty - they'll immediately get up-to-date copies upon starting
 		workers_done = 0;      // make sure to reset the done count - done by us because it's our spurious failure condition
 
 		// start the worker threads - done under lock to ensure all workers are waiting before we continue
@@ -239,10 +238,10 @@ void crypto_service::reset() noexcept
 {
 	maskoff = 0;
 }
-void crypto_service::process(char *buffer, std::size_t start, std::size_t count)
+void crypto_service::process(void *buffer, std::size_t start, std::size_t count)
 {
 	// update the shared variables
-	data = buffer + start;
+	data = reinterpret_cast<char*>(buffer) + start;
 	length = count;
 	width = count / workerc;
 	
@@ -263,7 +262,7 @@ void crypto_service::process(char *buffer, std::size_t start, std::size_t count)
 
 // -------------------------------
 
-void crypto_service::process_stream(std::istream &in, std::ostream &out, char *buffer, std::size_t buflen, std::ostream *log)
+void crypto_service::process_stream(std::istream &in, std::ostream &out, void *buffer, std::size_t buflen, std::ostream *log)
 {
 	// -- load stats -- //
 
@@ -291,7 +290,7 @@ void crypto_service::process_stream(std::istream &in, std::ostream &out, char *b
 		// seek read pos (required if in/out are the same file)
 		in.seekg(in_pos);
 		// read data from input
-		in.read(buffer, buflen);
+		in.read(reinterpret_cast<char*>(buffer), buflen);
 
 		// get the number of bytes read
 		std::streamsize len = in.gcount();
@@ -306,7 +305,7 @@ void crypto_service::process_stream(std::istream &in, std::ostream &out, char *b
 		// seek write pos (required if in/out are the same file)
 		out.seekp(out_pos);
 		// write the result back to output
-		out.write(buffer, len);
+		out.write(reinterpret_cast<char*>(buffer), len);
 
 		// increment things as needed
 		progress += len;
@@ -384,7 +383,7 @@ bool openf(const char *path, std::fstream &f, std::ostream *log = nullptr)
 	return true;
 }
 
-bool crypto_service::process_file(const char *in_path, const char *out_path, char *buffer, std::size_t buflen, std::ostream *log)
+bool crypto_service::process_file(const char *in_path, const char *out_path, void *buffer, std::size_t buflen, std::ostream *log)
 {
 	// open the files
 	std::ifstream in;
@@ -395,7 +394,7 @@ bool crypto_service::process_file(const char *in_path, const char *out_path, cha
 	process_stream(in, out, buffer, buflen, log);
 	return true;
 }
-bool crypto_service::process_file_in_place(const char *path, char *buffer, std::size_t buflen, std::ostream *log)
+bool crypto_service::process_file_in_place(const char *path, void *buffer, std::size_t buflen, std::ostream *log)
 {
 	// open the file
 	std::fstream f;
@@ -406,7 +405,7 @@ bool crypto_service::process_file_in_place(const char *path, char *buffer, std::
 	return true;
 }
 
-std::size_t crypto_service::process_file_in_place_recursive(const char *root_path, char *buffer, std::size_t buflen, std::ostream *log)
+std::size_t crypto_service::process_file_in_place_recursive(const char *root_path, void *buffer, std::size_t buflen, std::ostream *log)
 {
 	std::size_t successes = 0; // number of successful operations
 

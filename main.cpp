@@ -106,7 +106,7 @@ int main(int argc, const char **argv)
 
 	// begin timing
 	auto start = std::chrono::high_resolution_clock::now();
-
+	
 	// if recursive processing
 	if (recursive)
 	{
